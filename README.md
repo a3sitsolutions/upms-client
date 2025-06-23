@@ -4,7 +4,15 @@ Este script coleta dados de impressoras via SNMP e envia para a API do UPMS. Imp
 
 ## Funcionalidades
 
-### 🔄 Controle Diário de Envios
+### � Scanner de OIDs para Impressoras
+- **Descoberta automática de impressoras na rede** - Varre automaticamente a rede procurando impressoras
+- **Identificação de modelos** - Extrai modelo da impressora automaticamente
+- **Seleção interativa** - Permite escolher uma impressora específica ou varrer todas
+- **Varredura de OIDs** - Coleta propriedades como modelo, número de série, páginas impressas, etc.
+- **Geração de configuração YAML** - Cria arquivo pronto para uso no coletor
+- **Suporte a múltiplos formatos de rede** - CIDR, asterisco, range específico
+
+### �🔄 Controle Diário de Envios
 - **1 envio por dia por impressora** - Evita envios duplicados
 - Testa conectividade com o servidor antes de coletar dados
 - Salva dados localmente quando servidor indisponível
@@ -105,10 +113,32 @@ Start-ScheduledTask -TaskName "UPMS-SNMP-Collector"
 
 ## 🔍 Scanner de OIDs para Impressoras
 
-Para configurar novas impressoras, use o scanner automático de OIDs:
+O scanner automatiza a descoberta de impressoras na rede e a configuração de OIDs.
 
-### Scan Rápido (Recomendado)
+### Descoberta Automática de Rede (Recomendado)
 ```powershell
+.\scan-printer-oids.ps1 -NetworkScan
+```
+- Detecta automaticamente a rede local
+- Varre todos os IPs procurando impressoras  
+- Exibe lista de impressoras encontradas com modelo/IP
+- Permite selecionar uma impressora ou varrer todas
+
+### Descoberta com Range Específico
+```powershell
+# Formato CIDR
+.\scan-printer-oids.ps1 -NetworkRange "192.168.1.0/24"
+
+# Formato com asterisco  
+.\scan-printer-oids.ps1 -NetworkRange "10.0.0.*"
+
+# Range específico
+.\scan-printer-oids.ps1 -NetworkRange "172.16.1.10-172.16.1.50"
+```
+
+### Varredura de IP Específico
+```powershell
+# Scan rápido (apenas OIDs essenciais)
 .\scan-printer-oids.ps1 -PrinterIP 192.168.1.100 -QuickScan
 ```
 - Testa apenas OIDs essenciais
@@ -130,6 +160,24 @@ Para configurar novas impressoras, use o scanner automático de OIDs:
 - Inclui SNMP walk para descobrir novos OIDs
 - Pode demorar vários minutos
 - Útil para impressoras de marcas não conhecidas
+
+### Scripts de Demonstração
+
+**Guia interativo de uso:**
+```powershell
+.\demo-scan-guide.ps1
+```
+- Interface interativa para escolher modo de varredura
+- Exemplos práticos de comandos
+- Orientações passo a passo
+
+**Demonstração de varredura de rede:**
+```powershell
+.\demo-network-scan.ps1
+```
+- Explicações detalhadas sobre varredura de rede
+- Exemplos de diferentes formatos de range
+- Demonstração prática opcional
 
 ### Exportar Configuração
 ```powershell
