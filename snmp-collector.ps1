@@ -159,14 +159,21 @@ function Show-APIData {
     param(
         [string]$Model,
         [string]$SerialNumber,
-        [int]$TotalPrintedPages
+        [int]$TotalPrintedPages,
+        [string]$CollectionTime = $null
     )
+    
+    # Se nao foi fornecida uma data especifica, usa a data atual
+    if (-not $CollectionTime) {
+        $CollectionTime = Get-Date -Format "yyyy-MM-dd"
+    }
     
     Write-Host "`n  -> DADOS PARA API (MODO TESTE):" -ForegroundColor Cyan
     Write-Host "     {" -ForegroundColor White
     Write-Host "       `"model`": `"$Model`"," -ForegroundColor White
     Write-Host "       `"serialNumber`": `"$SerialNumber`"," -ForegroundColor White
-    Write-Host "       `"totalPrintedPages`": $TotalPrintedPages" -ForegroundColor White
+    Write-Host "       `"totalPrintedPages`": $TotalPrintedPages," -ForegroundColor White
+    Write-Host "       `"time`": `"$CollectionTime`"" -ForegroundColor White
     Write-Host "     }" -ForegroundColor White
     Write-Host "     Status: Dados prontos para envio!" -ForegroundColor Green
 }
@@ -177,13 +184,21 @@ function Send-PrinterDataToAPI {
         [string]$Model,
         [string]$SerialNumber,
         [int]$TotalPrintedPages,
-        [string]$ApiEndpoint
+        [string]$ApiEndpoint,
+        [string]$CollectionTime = $null
     )
-      # Prepara o JSON com escape correto para caracteres especiais
+    
+    # Se nao foi fornecida uma data especifica, usa a data atual
+    if (-not $CollectionTime) {
+        $CollectionTime = Get-Date -Format "yyyy-MM-dd"
+    }
+    
+    # Prepara o JSON com escape correto para caracteres especiais
     $jsonData = @{
         model = $Model
         serialNumber = $SerialNumber
         totalPrintedPages = $TotalPrintedPages
+        time = $CollectionTime
     } | ConvertTo-Json -Compress
     
     Write-Host "`n  -> Enviando dados para API..." -ForegroundColor Cyan
@@ -197,7 +212,7 @@ function Send-PrinterDataToAPI {
         # Verifica se o executavel curl local existe
         if (-not (Test-Path $curlPath)) {
             Write-Host "     Erro: curl.exe nao encontrado na pasta do projeto: $curlPath" -ForegroundColor Red
-            return $false
+            return @{ success = $false; status = "error"; httpCode = 0 }
         }
           # Executa curl.exe local do projeto
         # Cria arquivo temporario para o JSON para evitar problemas com caracteres especiais
@@ -212,11 +227,21 @@ function Send-PrinterDataToAPI {
                 '-H', 'accept: */*',
                 '-H', 'Content-Type: application/json',
                 '--data-binary', "@$tempJsonFile",
+                '-w', '%{http_code}',  # Adiciona codigo HTTP na resposta
                 '--silent',
                 '--show-error'
             )
               $response = & $curlPath @curlArgs 2>&1
-            $httpCode = $LASTEXITCODE
+            $curlExitCode = $LASTEXITCODE
+            
+            # Extrai codigo HTTP da resposta (ultimos 3 caracteres)
+            $httpCode = 0
+            if ($response -and $response.Length -ge 3) {
+                $httpCodeStr = $response.Substring($response.Length - 3)
+                if ([int]::TryParse($httpCodeStr, [ref]$httpCode)) {
+                    $response = $response.Substring(0, $response.Length - 3)
+                }
+            }
         }
         finally {
             # Remove arquivo temporario
@@ -224,21 +249,31 @@ function Send-PrinterDataToAPI {
                 Remove-Item $tempJsonFile -Force
             }
         }
-        
-        if ($httpCode -eq 0) {
-            Write-Host "     Sucesso! Dados enviados para API" -ForegroundColor Green
-            if ($response) {
-                Write-Host "     Resposta: $response" -ForegroundColor White
+          if ($curlExitCode -eq 0) {
+            if ($httpCode -eq 200 -or $httpCode -eq 201) {
+                Write-Host "     Sucesso! Dados enviados para API (HTTP $httpCode)" -ForegroundColor Green
+                if ($response) {
+                    Write-Host "     Resposta: $response" -ForegroundColor White
+                }
+                return @{ success = $true; status = "success"; httpCode = $httpCode }
+            } elseif ($httpCode -eq 404) {
+                Write-Host "     Erro 404: Impressora nao encontrada no sistema" -ForegroundColor Red
+                return @{ success = $false; status = "not_found"; httpCode = $httpCode }
+            } elseif ($httpCode -eq 500) {
+                Write-Host "     Erro 500: Erro interno do servidor" -ForegroundColor Red
+                return @{ success = $false; status = "server_error"; httpCode = $httpCode }
+            } else {
+                Write-Host "     Erro HTTP $httpCode`: $response" -ForegroundColor Red
+                return @{ success = $false; status = "http_error"; httpCode = $httpCode }
             }
-            return $true
         } else {
             Write-Host "     Erro no envio: $response" -ForegroundColor Red
-            return $false
+            return @{ success = $false; status = "connection_error"; httpCode = 0 }
         }
     }
     catch {
         Write-Host "     Erro na chamada da API: $($_.Exception.Message)" -ForegroundColor Red
-        return $false
+        return @{ success = $false; status = "error"; httpCode = 0 }
     }
 }
 
@@ -250,41 +285,78 @@ function Test-ServerConnectivity {
     )
     
     try {
-        $curlPath = Join-Path $PSScriptRoot "curl\curl.exe"
-        
-        if (-not (Test-Path $curlPath)) {
-            Write-Host "     Erro: curl.exe nao encontrado" -ForegroundColor Red
-            return $false
-        }
-        
         # Extrai apenas o dominio base da URL para teste
         $uri = [System.Uri]$ApiEndpoint
-        $baseUrl = "$($uri.Scheme)://$($uri.Host)"
+        $hostname = $uri.Host
+        $port = if ($uri.Port -and $uri.Port -ne -1) { $uri.Port } else { if ($uri.Scheme -eq "https") { 443 } else { 80 } }
         
-        Write-Host "     Testando conectividade com servidor: $baseUrl" -ForegroundColor Gray
+        Write-Host "     Testando conectividade com servidor usando Test-NetConnection..." -ForegroundColor Gray
+        Write-Host "     Host: $hostname, Porta: $port" -ForegroundColor Gray
         
-        $curlArgs = @(
-            '--head',
-            '--silent',
-            '--max-time', $TimeoutSeconds.ToString(),
-            '--fail',
-            $baseUrl
-        )
+        # Usa Test-NetConnection para verificar conectividade TCP
+        $connectionTest = Test-NetConnection -ComputerName $hostname -Port $port -WarningAction SilentlyContinue
         
-        $null = & $curlPath @curlArgs 2>&1
-        $success = $LASTEXITCODE -eq 0
-        
-        if ($success) {
-            Write-Host "     Servidor acessivel!" -ForegroundColor Green
+        if ($connectionTest.TcpTestSucceeded) {
+            Write-Host "     Servidor acessivel! (TCP conectado)" -ForegroundColor Green
+            return $true
         } else {
-            Write-Host "     Servidor inacessivel ou sem conexao" -ForegroundColor Yellow
+            Write-Host "     Servidor inaccessivel ou sem conexao" -ForegroundColor Yellow
+            Write-Host "     Detalhes: $($connectionTest.TcpTestSucceeded)" -ForegroundColor Gray
+            return $false
         }
-        
-        return $success
     }
     catch {
         Write-Host "     Erro ao testar conectividade: $($_.Exception.Message)" -ForegroundColor Red
         return $false
+    }
+}
+
+# Funcao para verificar se impressora ja foi enviada hoje
+function Check-DailySubmission {
+    param(
+        [string]$PrinterIP,
+        [string]$CollectionDate
+    )
+    
+    $localDataDir = Join-Path $PSScriptRoot "local-data"
+    $localDataFile = Join-Path $localDataDir "local-data.json"
+    
+    if (-not (Test-Path $localDataFile)) {
+        return @{ alreadySent = $false; hasPending = $false }
+    }
+    
+    try {
+        $fileContent = Get-Content $localDataFile -Raw
+        if (-not $fileContent) {
+            return @{ alreadySent = $false; hasPending = $false }
+        }
+        
+        $dataEntries = ConvertFrom-Json $fileContent
+        if ($dataEntries -isnot [System.Array]) {
+            $dataEntries = @($dataEntries)
+        }
+        
+        # Verifica se ja foi enviado com sucesso hoje
+        $successEntry = $dataEntries | Where-Object { 
+            $_.printerIP -eq $PrinterIP -and 
+            $_.time -eq $CollectionDate -and 
+            $_.status -eq "sent" 
+        }
+        
+        # Verifica se tem pendencia para hoje
+        $pendingEntry = $dataEntries | Where-Object { 
+            $_.printerIP -eq $PrinterIP -and 
+            $_.time -eq $CollectionDate -and 
+            $_.status -eq "pending" 
+        }
+          return @{ 
+            alreadySent = ($null -ne $successEntry)
+            hasPending = ($null -ne $pendingEntry)
+        }
+    }
+    catch {
+        Write-Host "     Erro ao verificar envios diarios: $($_.Exception.Message)" -ForegroundColor Red
+        return @{ alreadySent = $false; hasPending = $false }
     }
 }
 
@@ -295,48 +367,68 @@ function Save-DataLocally {
         [string]$SerialNumber,
         [int]$TotalPrintedPages,
         [string]$PrinterIP,
-        [string]$ApiEndpoint
+        [string]$ApiEndpoint,
+        [string]$CollectionTime = $null,
+        [string]$Status = "pending"
     )
     
     try {
+        # Se nao foi fornecida uma data especifica, usa a data atual
+        if (-not $CollectionTime) {
+            $CollectionTime = Get-Date -Format "yyyy-MM-dd"
+        }
+        
         # Cria diretorio local-data se nao existir
         $localDataDir = Join-Path $PSScriptRoot "local-data"
         if (-not (Test-Path $localDataDir)) {
             New-Item -ItemType Directory -Path $localDataDir | Out-Null
         }
         
-        # Nome do arquivo baseado na data atual
-        $dateString = Get-Date -Format "yyyy-MM-dd"
-        $localDataFile = Join-Path $localDataDir "printer-data-$dateString.json"
+        # Usa arquivo unico local-data.json
+        $localDataFile = Join-Path $localDataDir "local-data.json"
         
         # Cria objeto com dados e timestamp
         $dataEntry = @{
+            id = [System.Guid]::NewGuid().ToString()
             timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
             printerIP = $PrinterIP
             model = $Model
             serialNumber = $SerialNumber
             totalPrintedPages = $TotalPrintedPages
+            time = $CollectionTime
             apiEndpoint = $ApiEndpoint
-            status = "pending"
-        }
-        
-        # Le dados existentes no arquivo ou cria array vazio
+            status = $Status
+        }        # Le dados existentes no arquivo ou cria array vazio
         $existingData = @()
         if (Test-Path $localDataFile) {
             $existingContent = Get-Content $localDataFile -Raw
             if ($existingContent) {
-                $existingData = ConvertFrom-Json $existingContent
+                $jsonData = ConvertFrom-Json $existingContent
+                # Garante que existingData seja sempre um array
+                if ($jsonData -is [System.Array]) {
+                    $existingData = $jsonData
+                } else {
+                    $existingData = @($jsonData)
+                }
+            }
+        }
+        
+        # Se for status "sent", remove qualquer entrada anterior para mesma impressora/data
+        if ($Status -eq "sent") {
+            $existingData = $existingData | Where-Object { 
+                -not ($_.printerIP -eq $PrinterIP -and $_.time -eq $CollectionTime) 
             }
         }
         
         # Adiciona nova entrada
-        $existingData += $dataEntry
+        $existingData = $existingData + $dataEntry
         
         # Salva dados atualizados
         $existingData | ConvertTo-Json -Depth 3 | Set-Content $localDataFile -Encoding UTF8
         
         Write-Host "     Dados salvos localmente: $localDataFile" -ForegroundColor Cyan
-        Write-Host "     Timestamp: $($dataEntry.timestamp)" -ForegroundColor Gray
+        Write-Host "     ID: $($dataEntry.id)" -ForegroundColor Gray
+        Write-Host "     Status: $Status" -ForegroundColor Gray
         
         return $true
     }
@@ -353,68 +445,131 @@ function Retry-LocalData {
     )
     
     $localDataDir = Join-Path $PSScriptRoot "local-data"
+    $localDataFile = Join-Path $localDataDir "local-data.json"
     
-    if (-not (Test-Path $localDataDir)) {
+    if (-not (Test-Path $localDataFile)) {
+        Write-Host "Nenhum dado local encontrado para reenvio." -ForegroundColor Gray
         return
     }
     
-    $jsonFiles = Get-ChildItem $localDataDir -Filter "*.json"
-    
-    if ($jsonFiles.Count -eq 0) {
-        return
-    }
-    
-    Write-Host "`n=== Tentando reenviar dados salvos localmente ===" -ForegroundColor Magenta
-    
-    $totalRetried = 0
-    $totalSuccess = 0
-    
-    foreach ($file in $jsonFiles) {
-        try {
-            $fileContent = Get-Content $file.FullName -Raw
-            if (-not $fileContent) { continue }
-            
-            $dataEntries = ConvertFrom-Json $fileContent
-            $updatedEntries = @()
-            $fileUpdated = $false
-            
-            foreach ($entry in $dataEntries) {
-                if ($entry.status -eq "pending") {
-                    $totalRetried++
-                    Write-Host "`nTentando reenviar dados de $($entry.timestamp):" -ForegroundColor Yellow
-                    Write-Host "  Impressora: $($entry.model) ($($entry.printerIP))" -ForegroundColor Gray
-                    
-                    $success = Send-PrinterDataToAPI -Model $entry.model -SerialNumber $entry.serialNumber -TotalPrintedPages $entry.totalPrintedPages -ApiEndpoint $entry.apiEndpoint
-                    
-                    if ($success) {
-                        $entry.status = "sent"
-                        $entry.sentTimestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-                        $totalSuccess++
-                        $fileUpdated = $true
-                        Write-Host "  Status: Reenviado com sucesso!" -ForegroundColor Green
-                    } else {
-                        Write-Host "  Status: Falha no reenvio" -ForegroundColor Red
-                    }
-                }
+    try {
+        $fileContent = Get-Content $localDataFile -Raw
+        if (-not $fileContent) { 
+            Write-Host "Arquivo local vazio." -ForegroundColor Gray
+            return 
+        }
+        
+        $dataEntries = ConvertFrom-Json $fileContent
+        
+        # Garante que seja sempre um array
+        if ($dataEntries -isnot [System.Array]) {
+            $dataEntries = @($dataEntries)
+        }
+        
+        # Filtra apenas registros pendentes
+        $pendingEntries = $dataEntries | Where-Object { $_.status -eq "pending" }
+        $notFoundEntries = $dataEntries | Where-Object { $_.status -eq "not_found" }
+        
+        if ($pendingEntries.Count -eq 0) {
+            Write-Host "Nenhum dado pendente para reenvio." -ForegroundColor Gray
+            if ($notFoundEntries.Count -gt 0) {
+                Write-Host "Existem $($notFoundEntries.Count) registro(s) marcado(s) como 'not_found' (nao serao reenviados)." -ForegroundColor Yellow
+            }
+            return
+        }
+        
+        Write-Host "`n=== Tentando reenviar dados salvos localmente ===" -ForegroundColor Magenta
+        Write-Host "Total de registros pendentes: $($pendingEntries.Count)" -ForegroundColor White
+        
+        $totalRetried = 0
+        $totalSuccess = 0
+        $totalNotFound = 0
+        $updatedEntries = @()
+        
+        # Mante registros "not_found" no arquivo
+        $updatedEntries += $notFoundEntries
+        
+        foreach ($entry in $pendingEntries) {
+            $totalRetried++
+            Write-Host "`nTentando reenviar dados de $($entry.timestamp):" -ForegroundColor Yellow
+            Write-Host "  ID: $($entry.id)" -ForegroundColor Gray
+            Write-Host "  Impressora: $($entry.model) ($($entry.printerIP))" -ForegroundColor Gray
+              $result = Send-PrinterDataToAPI -Model $entry.model -SerialNumber $entry.serialNumber -TotalPrintedPages $entry.totalPrintedPages -ApiEndpoint $entry.apiEndpoint -CollectionTime $entry.time            if ($result.success) {
+                $totalSuccess++
+                Write-Host "  Status: Reenviado com sucesso! (Marcado como 'sent')" -ForegroundColor Green
                 
-                $updatedEntries += $entry
-            }
-            
-            # Atualiza arquivo se houve mudancas
-            if ($fileUpdated) {
-                $updatedEntries | ConvertTo-Json -Depth 3 | Set-Content $file.FullName -Encoding UTF8
+                # Cria novo objeto marcado como 'sent' para historico
+                $sentEntry = @{
+                    id = $entry.id
+                    timestamp = $entry.timestamp
+                    printerIP = $entry.printerIP
+                    model = $entry.model
+                    serialNumber = $entry.serialNumber
+                    totalPrintedPages = $entry.totalPrintedPages
+                    time = $entry.time
+                    apiEndpoint = $entry.apiEndpoint
+                    status = "sent"
+                    sentTimestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                    httpCode = $result.httpCode
+                }
+                $updatedEntries += $sentEntry            } elseif ($result.status -eq "not_found") {
+                $totalNotFound++
+                Write-Host "  Status: Impressora nao encontrada (404) - marcado como 'not_found'" -ForegroundColor Red
+                
+                # Cria novo objeto marcado como not_found
+                $notFoundEntry = @{
+                    id = $entry.id
+                    timestamp = $entry.timestamp
+                    printerIP = $entry.printerIP
+                    model = $entry.model
+                    serialNumber = $entry.serialNumber
+                    totalPrintedPages = $entry.totalPrintedPages
+                    time = $entry.time
+                    apiEndpoint = $entry.apiEndpoint
+                    status = "not_found"
+                    lastTryTimestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                    httpCode = $result.httpCode
+                }
+                $updatedEntries += $notFoundEntry
+            } else {
+                Write-Host "  Status: Falha no reenvio - mantido como pendente" -ForegroundColor Red
+                
+                # Cria novo objeto mantendo como pendente com timestamp atualizado
+                $pendingEntry = @{
+                    id = $entry.id
+                    timestamp = $entry.timestamp
+                    printerIP = $entry.printerIP
+                    model = $entry.model
+                    serialNumber = $entry.serialNumber
+                    totalPrintedPages = $entry.totalPrintedPages
+                    time = $entry.time
+                    apiEndpoint = $entry.apiEndpoint
+                    status = "pending"
+                    lastTryTimestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                }
+                if ($result.httpCode) {
+                    $pendingEntry.lastHttpCode = $result.httpCode
+                }
+                $updatedEntries += $pendingEntry
             }
         }
-        catch {
-            Write-Host "Erro ao processar arquivo $($file.Name): $($_.Exception.Message)" -ForegroundColor Red
+          # Atualiza arquivo com registros atualizados
+        if ($updatedEntries.Count -gt 0) {
+            $updatedEntries | ConvertTo-Json -Depth 3 | Set-Content $localDataFile -Encoding UTF8
+        } else {
+            # Se nao ha mais registros, remove o arquivo
+            Remove-Item $localDataFile -Force
+            Write-Host "`nArquivo local removido (nenhum registro restante)." -ForegroundColor Green
         }
-    }
-    
-    if ($totalRetried -gt 0) {
-        Write-Host "`nResultado do reenvio:" -ForegroundColor Cyan
+          Write-Host "`nResultado do reenvio:" -ForegroundColor Cyan
         Write-Host "  Total tentativas: $totalRetried" -ForegroundColor White
-        Write-Host "  Sucessos: $totalSuccess" -ForegroundColor Green
-        Write-Host "  Falhas: $($totalRetried - $totalSuccess)" -ForegroundColor Red
+        Write-Host "  Sucessos (marcados como 'sent'): $totalSuccess" -ForegroundColor Green
+        Write-Host "  Nao encontrados (404): $totalNotFound" -ForegroundColor Yellow
+        Write-Host "  Falhas (mantidos como 'pending'): $($totalRetried - $totalSuccess - $totalNotFound)" -ForegroundColor Red
+        Write-Host "  Total de registros no arquivo: $($updatedEntries.Count)" -ForegroundColor Cyan
+    }
+    catch {
+        Write-Host "Erro ao processar dados locais: $($_.Exception.Message)" -ForegroundColor Red
     }
 }
 
@@ -496,11 +651,11 @@ function Read-PrintersConfigAndQuery {
             } else {
                 Write-Host "x SNMP nao respondeu - usando dados simulados" -ForegroundColor Yellow
             }
-            
-            # Variaveis para armazenar os dados necessarios para a API
+              # Variaveis para armazenar os dados necessarios para a API
             $modelData = ""
             $serialNumberData = ""
             $totalPagesData = 0
+            $collectionTime = Get-Date -Format "yyyy-MM-dd"
             
             # Consulta cada OID configurado para esta impressora
             Write-Host "`nConsultando informacoes da impressora:" -ForegroundColor Cyan
@@ -559,43 +714,63 @@ function Read-PrintersConfigAndQuery {
                         Write-Host "     $displayName`: Falha na consulta" -ForegroundColor Red
                     }
                 }
-            }
-              # Processa dados para API
+            }            # Processa dados para API
             if ($modelData -and $serialNumberData -and $totalPagesData -gt 0) {
                 if ($TestMode) {
                     # Modo teste: apenas mostra os dados
-                    Show-APIData -Model $modelData -SerialNumber $serialNumberData -TotalPrintedPages $totalPagesData
+                    Show-APIData -Model $modelData -SerialNumber $serialNumberData -TotalPrintedPages $totalPagesData -CollectionTime $collectionTime
                     $successfulAPI++
                 } else {
-                    # Modo producao: verifica conectividade e envia/salva conforme necessario
-                    if ($serverAvailable) {
-                        # Servidor disponivel: tenta enviar para API
-                        $apiSuccess = Send-PrinterDataToAPI -Model $modelData -SerialNumber $serialNumberData -TotalPrintedPages $totalPagesData -ApiEndpoint $ApiEndpoint
-                        
-                        if ($apiSuccess) {
-                            $successfulAPI++
-                            Write-Host "`n     Status: Dados enviados com sucesso para API!" -ForegroundColor Green
-                        } else {
-                            $failedAPI++
-                            Write-Host "`n     Status: Falha no envio para API - salvando localmente" -ForegroundColor Yellow
+                    # Modo producao: verifica se ja foi enviado hoje
+                    $dailyCheck = Check-DailySubmission -PrinterIP $printer.ip -CollectionDate $collectionTime
+                    
+                    if ($dailyCheck.alreadySent) {
+                        Write-Host "`n     Status: Dados ja enviados hoje - pulando envio" -ForegroundColor Green
+                        $successfulAPI++
+                    } elseif ($dailyCheck.hasPending) {
+                        Write-Host "`n     Status: Tentativa pendente para hoje - sera processada no reenvio" -ForegroundColor Yellow
+                        $savedLocally++
+                    } else {
+                        # Verifica conectividade e envia/salva conforme necessario
+                        if ($serverAvailable) {
+                            # Servidor disponivel: tenta enviar para API
+                            $apiResult = Send-PrinterDataToAPI -Model $modelData -SerialNumber $serialNumberData -TotalPrintedPages $totalPagesData -ApiEndpoint $ApiEndpoint -CollectionTime $collectionTime
                             
-                            # Se falha no envio, salva localmente
-                            $saveSuccess = Save-DataLocally -Model $modelData -SerialNumber $serialNumberData -TotalPrintedPages $totalPagesData -PrinterIP $printer.ip -ApiEndpoint $ApiEndpoint
+                            if ($apiResult.success) {
+                                $successfulAPI++
+                                Write-Host "`n     Status: Dados enviados com sucesso para API!" -ForegroundColor Green
+                                # Salva como 'sent' para controle diario
+                                Save-DataLocally -Model $modelData -SerialNumber $serialNumberData -TotalPrintedPages $totalPagesData -PrinterIP $printer.ip -ApiEndpoint $ApiEndpoint -CollectionTime $collectionTime -Status "sent"
+                            } elseif ($apiResult.status -eq "not_found") {
+                                # Erro 404: salva como not_found (nao sera reenviado)
+                                Write-Host "`n     Status: Impressora nao encontrada (404) - salvando como 'not_found'" -ForegroundColor Yellow
+                                $saveSuccess = Save-DataLocally -Model $modelData -SerialNumber $serialNumberData -TotalPrintedPages $totalPagesData -PrinterIP $printer.ip -ApiEndpoint $ApiEndpoint -CollectionTime $collectionTime -Status "not_found"
+                                if ($saveSuccess) {
+                                    $savedLocally++
+                                } else {
+                                    $failedAPI++
+                                }
+                            } else {
+                                # Outros erros: salva como pending para reenvio
+                                $failedAPI++
+                                Write-Host "`n     Status: Falha no envio para API - salvando localmente" -ForegroundColor Yellow
+                                $saveSuccess = Save-DataLocally -Model $modelData -SerialNumber $serialNumberData -TotalPrintedPages $totalPagesData -PrinterIP $printer.ip -ApiEndpoint $ApiEndpoint -CollectionTime $collectionTime -Status "pending"
+                                if ($saveSuccess) {
+                                    $savedLocally++
+                                }
+                            }
+                        } else {
+                            # Servidor indisponivel: salva dados localmente como pending
+                            Write-Host "`n     Status: Servidor indisponivel - salvando dados localmente" -ForegroundColor Yellow
+                            $saveSuccess = Save-DataLocally -Model $modelData -SerialNumber $serialNumberData -TotalPrintedPages $totalPagesData -PrinterIP $printer.ip -ApiEndpoint $ApiEndpoint -CollectionTime $collectionTime -Status "pending"
+                            
                             if ($saveSuccess) {
                                 $savedLocally++
+                                Write-Host "`n     Status: Dados salvos localmente com sucesso!" -ForegroundColor Cyan
+                            } else {
+                                $failedAPI++
+                                Write-Host "`n     Status: Falha ao salvar dados localmente" -ForegroundColor Red
                             }
-                        }
-                    } else {
-                        # Servidor indisponivel: salva dados localmente
-                        Write-Host "`n     Status: Servidor indisponivel - salvando dados localmente" -ForegroundColor Yellow
-                        $saveSuccess = Save-DataLocally -Model $modelData -SerialNumber $serialNumberData -TotalPrintedPages $totalPagesData -PrinterIP $printer.ip -ApiEndpoint $ApiEndpoint
-                        
-                        if ($saveSuccess) {
-                            $savedLocally++
-                            Write-Host "`n     Status: Dados salvos localmente com sucesso!" -ForegroundColor Cyan
-                        } else {
-                            $failedAPI++
-                            Write-Host "`n     Status: Falha ao salvar dados localmente" -ForegroundColor Red
                         }
                     }
                 }
