@@ -103,6 +103,60 @@ Start-ScheduledTask -TaskName "UPMS-SNMP-Collector"
 .\schedule-task.ps1 -IntervalHours 2  # A cada 2 horas
 ```
 
+## 🔍 Scanner de OIDs para Impressoras
+
+Para configurar novas impressoras, use o scanner automático de OIDs:
+
+### Scan Rápido (Recomendado)
+```powershell
+.\scan-printer-oids.ps1 -PrinterIP 192.168.1.100 -QuickScan
+```
+- Testa apenas OIDs essenciais
+- Rápido e eficiente
+- Ideal para uso rotineiro
+
+### Scan Completo
+```powershell
+.\scan-printer-oids.ps1 -PrinterIP 192.168.1.100
+```
+- Testa todos os OIDs conhecidos por categoria
+- Mais detalhado
+- Inclui OIDs específicos por marca (Brother, HP, Canon, etc.)
+
+### Scan com Descoberta Automática
+```powershell
+.\scan-printer-oids.ps1 -PrinterIP 192.168.1.100 -FullScan
+```
+- Inclui SNMP walk para descobrir novos OIDs
+- Pode demorar vários minutos
+- Útil para impressoras de marcas não conhecidas
+
+### Exportar Configuração
+```powershell
+.\scan-printer-oids.ps1 -PrinterIP 192.168.1.100 -ExportConfig
+```
+- Salva resultados em arquivo JSON
+- Útil para documentação
+- Facilita compartilhamento de configurações
+
+### 📋 Categorias de OIDs Testadas
+
+- **Sistema**: Descrição, nome, localização, contato
+- **Páginas Impressas**: Contadores diversos por marca
+- **Número de Série**: OIDs específicos por fabricante  
+- **Modelo/Descrição**: Identificação do equipamento
+- **Status e Suprimentos**: Níveis de toner, status
+- **Informações de Rede**: IP, MAC, hostname
+
+### 🎯 Uso dos Resultados
+
+1. Execute o scan na sua impressora
+2. Copie a configuração YAML gerada
+3. Cole no arquivo `printers-config.yml`
+4. Ajuste modelo e descrição se necessário
+5. Teste com: `.\snmp-collector.ps1 -TestMode`
+6. Execute em produção: `.\snmp-collector.ps1`
+
 ## Scripts Auxiliares
 
 ### 🧪 Pré-teste de Dependências
