@@ -1,0 +1,21 @@
+[
+  {
+    "timestamp": "2025-06-22 14:30:45",
+    "printerIP": "192.168.15.106",
+    "model": "Brother NC-8300w",
+    "serialNumber": "U63885F9N733180",
+    "totalPrintedPages": 298935,
+    "apiEndpoint": "https://upms-backend.maranguape.a3sitsolutions.com.br/api/printer-history-public/by-printer",
+    "status": "pending"
+  },
+  {
+    "timestamp": "2025-06-22 15:30:45",
+    "printerIP": "192.168.15.106",
+    "model": "Brother NC-8300w",
+    "serialNumber": "U63885F9N733180",
+    "totalPrintedPages": 298941,
+    "apiEndpoint": "https://upms-backend.maranguape.a3sitsolutions.com.br/api/printer-history-public/by-printer",
+    "status": "sent",
+    "sentTimestamp": "2025-06-22 16:15:30"
+  }
+]

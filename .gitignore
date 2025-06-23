@@ -1,0 +1,13 @@
+# Dados locais salvos quando servidor indisponível
+local-data/
+
+# Arquivos temporários
+*.tmp
+temp/
+
+# Logs
+*.log
+
+# Arquivos de backup
+*.bak
+*~
