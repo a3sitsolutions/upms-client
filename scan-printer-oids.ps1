@@ -9,7 +9,8 @@ param(
     [switch]$ExportConfig = $false,
     [string]$OutputFile = "",
     [switch]$QuickScan = $false,
-    [switch]$NetworkScan = $false
+    [switch]$NetworkScan = $false,
+    [switch]$ScanAll = $false
 )
 
 # OIDs conhecidos para diferentes propriedades de impressoras
@@ -445,7 +446,7 @@ function Start-PrinterOIDScan {
 # ===============================================
 
 # Verifica se deve fazer varredura de rede ou IP direto
-if ($NetworkScan -or $NetworkRange) {
+if ($NetworkScan -or $NetworkRange -or $ScanAll) {
     # Modo varredura de rede
     Write-Host "===============================================" -ForegroundColor Cyan
     Write-Host "MODO: VARREDURA DE REDE" -ForegroundColor Cyan
@@ -462,6 +463,13 @@ if ($NetworkScan -or $NetworkRange) {
                     $prefix = $ipConfig.PrefixLength
                     $NetworkRange = "$ip/$prefix"
                     Write-Host "Rede detectada automaticamente: $NetworkRange" -ForegroundColor Green
+                    
+                    if ($ScanAll) {
+                        # Se ScanAll foi especificado, converte para formato mais amplo
+                        $ipParts = $ip.Split('.')
+                        $NetworkRange = "$($ipParts[0]).$($ipParts[1]).$($ipParts[2]).*"
+                        Write-Host "Modo ScanAll ativado - Varrendo toda a subrede: $NetworkRange" -ForegroundColor Yellow
+                    }
                 }
             }
         } catch {
@@ -469,12 +477,17 @@ if ($NetworkScan -or $NetworkRange) {
         }
         
         if (-not $NetworkRange) {
-            $NetworkRange = Read-Host "Digite o range de rede (ex: 192.168.1.0/24, 10.0.0.*, 172.16.1.1-172.16.1.50)"
+            if ($ScanAll) {
+                Write-Host "Erro: Não foi possível detectar a rede local automaticamente." -ForegroundColor Red
+                Write-Host "Use: .\scan-printer-oids.ps1 -NetworkRange '192.168.1.*' -ScanAll" -ForegroundColor Yellow
+                exit 1
+            } else {
+                $NetworkRange = Read-Host "Digite o range de rede (ex: 192.168.1.0/24, 10.0.0.*, 172.16.1.1-172.16.1.50)"
+            }
         }
     }
-    
-    # Iniciar varredura de rede
-    $selectedPrinters = Start-NetworkPrinterScan -NetworkRange $NetworkRange -Community $Community
+      # Iniciar varredura de rede
+    $selectedPrinters = Start-NetworkPrinterScan -NetworkRange $NetworkRange -Community $Community -ScanAll:$ScanAll
     
     if (-not $selectedPrinters) {
         Write-Host "Nenhuma impressora selecionada para varredura de OIDs." -ForegroundColor Yellow
@@ -526,5 +539,229 @@ if ($NetworkScan -or $NetworkRange) {
 Write-Host "`n===============================================" -ForegroundColor Green
 Write-Host "VARREDURA CONCLUÍDA COM SUCESSO" -ForegroundColor Green
 Write-Host "===============================================" -ForegroundColor Green
+
+# Função para gerar lista de IPs de uma rede
+function Get-NetworkIPs {
+    param(
+        [string]$NetworkRange
+    )
+    
+    $ips = @()
+    
+    # Suporte para diferentes formatos de rede
+    if ($NetworkRange -match '^(\d+\.\d+\.\d+\.)(\d+)-(\d+)$') {
+        # Formato: 192.168.1.1-254
+        $baseNetwork = $matches[1]
+        $startRange = [int]$matches[2]
+        $endRange = [int]$matches[3]
+        
+        for ($i = $startRange; $i -le $endRange; $i++) {
+            $ips += "$baseNetwork$i"
+        }
+    }
+    elseif ($NetworkRange -match '^(\d+\.\d+\.\d+\.\d+)/(\d+)$') {
+        # Formato CIDR: 192.168.1.0/24
+        $networkAddr = $matches[1]
+        $cidr = [int]$matches[2]
+        
+        $ip = [System.Net.IPAddress]::Parse($networkAddr)
+        $mask = [System.Net.IPAddress]::Parse((ConvertTo-SubnetMask -CIDR $cidr))
+        
+        # Calcula rede e broadcast
+        $networkInt = [System.BitConverter]::ToUInt32($ip.GetAddressBytes(), 0)
+        $maskInt = [System.BitConverter]::ToUInt32($mask.GetAddressBytes(), 0)
+        $networkStart = $networkInt -band $maskInt
+        $networkEnd = $networkStart -bor (-bnot $maskInt)
+        
+        for ($i = $networkStart + 1; $i -lt $networkEnd; $i++) {
+            $ipBytes = [System.BitConverter]::GetBytes($i)
+            $ips += [System.Net.IPAddress]::new($ipBytes).ToString()
+        }
+    }
+    elseif ($NetworkRange -match '^(\d+\.\d+\.\d+\.\*)$') {
+        # Formato: 192.168.1.*
+        $baseNetwork = $NetworkRange -replace '\*', ''
+        for ($i = 1; $i -le 254; $i++) {
+            $ips += "$baseNetwork$i"
+        }
+    }
+    else {
+        Write-Host "Formato de rede não suportado. Use:" -ForegroundColor Red
+        Write-Host "  192.168.1.1-254" -ForegroundColor Gray
+        Write-Host "  192.168.1.0/24" -ForegroundColor Gray  
+        Write-Host "  192.168.1.*" -ForegroundColor Gray
+        return @()
+    }
+    
+    return $ips
+}
+
+# Função para converter CIDR em máscara de sub-rede
+function ConvertTo-SubnetMask {
+    param([int]$CIDR)
+    
+    $mask = [Math]::Pow(2, 32) - [Math]::Pow(2, (32 - $CIDR))
+    $bytes = [System.BitConverter]::GetBytes([UInt32]$mask)
+    return [System.Net.IPAddress]::new($bytes[3], $bytes[2], $bytes[1], $bytes[0]).ToString()
+}
+
+# Função para testar se um IP tem SNMP habilitado
+function Test-SNMPDevice {
+    param(
+        [string]$IpAddress,
+        [string]$Community = "public",
+        [int]$TimeoutSeconds = 2
+    )
+    
+    try {
+        $snmpgetPath = Join-Path $PSScriptRoot "snmp\snmpget.exe"
+        
+        if (-not (Test-Path $snmpgetPath)) {
+            return $null
+        }
+        
+        # Testa OID básico do sistema (sysDescr) com timeout curto
+        $result = & $snmpgetPath -v2c -c $Community -t $TimeoutSeconds -r 1 -On -Oe $IpAddress "1.3.6.1.2.1.1.1.0" 2>&1
+        
+        if ($LASTEXITCODE -eq 0 -and $result -and $result -notlike "*Timeout*" -and $result -notlike "*No Such*") {
+            # Converte resultado para string
+            if ($result -is [array]) {
+                $resultText = $result -join "`n"
+            } else {
+                $resultText = $result.ToString()
+            }
+            
+            # Extrai valor da descrição do sistema
+            if ($resultText -match 'STRING:\s*"([^"]*)"') {
+                return $matches[1]
+            } elseif ($resultText -match 'STRING:\s*([^\r\n]*)') {
+                return $matches[1].Trim()
+            }
+        }
+        
+        return $null
+    }
+    catch {
+        return $null
+    }
+}
+
+# Função para identificar se um dispositivo é uma impressora
+function Test-IsPrinter {
+    param(
+        [string]$SystemDescription
+    )
+    
+    if ([string]::IsNullOrWhiteSpace($SystemDescription)) {
+        return $false
+    }
+    
+    $printerKeywords = @(
+        "printer", "print", "laser", "inkjet", "multifunction", "mfc", "mfp",
+        "brother", "hp", "canon", "epson", "xerox", "lexmark", "kyocera",
+        "laserjet", "deskjet", "officejet", "imagerunner", "workforce",
+        "copystar", "ricoh", "sharp", "konica", "bizhub", "taskalfa"
+    )
+    
+    $description = $SystemDescription.ToLower()
+    
+    foreach ($keyword in $printerKeywords) {
+        if ($description -contains $keyword -or $description -like "*$keyword*") {
+            return $true
+        }
+    }
+    
+    return $false
+}
+
+# Função para extrair modelo da impressora da descrição
+function Get-PrinterModel {
+    param(
+        [string]$SystemDescription
+    )
+    
+    if ([string]::IsNullOrWhiteSpace($SystemDescription)) {
+        return "Modelo Desconhecido"
+    }
+    
+    # Remove caracteres de controle e limpa a string
+    $cleanDescription = $SystemDescription -replace '[^\x20-\x7E]', '' -replace '\s+', ' '
+    $cleanDescription = $cleanDescription.Trim()
+    
+    # Tenta extrair modelo específico
+    if ($cleanDescription -match '(Brother\s+[A-Z0-9\-]+)') {
+        return $matches[1]
+    }
+    elseif ($cleanDescription -match '(HP\s+\w+[\w\s\-]+)') {
+        return $matches[1]
+    }
+    elseif ($cleanDescription -match '(Canon\s+[\w\s\-]+)') {
+        return $matches[1]
+    }
+    elseif ($cleanDescription -match '(Xerox\s+[\w\s\-]+)') {
+        return $matches[1]
+    }
+    elseif ($cleanDescription -match '(Lexmark\s+[\w\s\-]+)') {
+        return $matches[1]
+    }
+    else {
+        # Se não conseguir extrair modelo específico, retorna os primeiros 50 caracteres
+        if ($cleanDescription.Length -gt 50) {
+            return $cleanDescription.Substring(0, 50) + "..."
+        }
+        return $cleanDescription
+    }
+}
+
+# Função para varredura de rede em busca de impressoras
+function Start-NetworkPrinterScan {
+    param(
+        [string]$NetworkRange,
+        [string]$Community = "public",
+        [switch]$ScanAll = $false
+    )
+    
+    Write-Host "===============================================" -ForegroundColor Cyan
+    Write-Host "VARREDURA DE REDE - PROCURANDO IMPRESSORAS" -ForegroundColor Cyan
+    Write-Host "===============================================" -ForegroundColor Cyan
+    Write-Host "Rede: $NetworkRange" -ForegroundColor White
+    Write-Host "Comunidade SNMP: $Community" -ForegroundColor White
+    
+    if ($ScanAll) {
+        Write-Host "Modo: Varrer TODAS as impressoras encontradas" -ForegroundColor Yellow
+    }
+    
+    # Gera lista de IPs para testar
+    Write-Host "`nGerando lista de IPs para verificar..." -ForegroundColor Yellow
+    $ips = Get-NetworkIPs -NetworkRange $NetworkRange
+    
+    if ($ips.Count -eq 0) {
+        Write-Host "Erro: Não foi possível gerar lista de IPs" -ForegroundColor Red
+        return @()
+    }
+    
+    Write-Host "Total de IPs para verificar: $($ips.Count)" -ForegroundColor Cyan
+    Write-Host "Iniciando varredura SNMP..." -ForegroundColor Yellow
+    Write-Host "(Isso pode demorar alguns minutos dependendo do tamanho da rede)" -ForegroundColor Gray
+    
+    $foundDevices = @()
+    $printers = @()
+    $currentIP = 0
+    $totalIPs = $ips.Count
+    
+    foreach ($ip in $ips) {
+        $currentIP++
+        
+        # Mostra progresso a cada 10 IPs
+        if ($currentIP % 10 -eq 0 -or $currentIP -eq $totalIPs) {
+            $percentage = [math]::Round(($currentIP / $totalIPs) * 100, 1)
+            Write-Host "Progresso: $currentIP/$totalIPs ($percentage%) - Verificando $ip" -ForegroundColor Gray
+        }
+        
+        # Testa SNMP no IP
+        $systemDescription = Test-SNMPDevice -IpAddress $ip -Community $Community -TimeoutSeconds 2
+        
+        if ($systemDescription) {
+            $foundDevices += @{
 
 
