@@ -440,427 +440,16 @@ function Start-PrinterOIDScan {
     }
 }
 
-# Execução principal
-Write-Host "SCANNER DE OIDS E DESCOBERTA DE IMPRESSORAS" -ForegroundColor Cyan
-Write-Host "=============================================" -ForegroundColor Cyan
-
-# Verifica se deve fazer varredura de rede primeiro
-if ([string]::IsNullOrWhiteSpace($PrinterIP) -or $NetworkScan) {
-    
-    # Se não foi especificado range de rede, tenta detectar automaticamente
-    if ([string]::IsNullOrWhiteSpace($NetworkRange)) {
-        Write-Host "`nDetectando rede local..." -ForegroundColor Yellow
-        
-        # Obtém configuração de rede local
-        $networkConfig = Get-NetIPConfiguration | Where-Object { $_.NetAdapter.Status -eq "Up" -and $_.IPv4Address -ne $null }
-        
-        if ($networkConfig) {
-            $localIP = $networkConfig[0].IPv4Address.IPAddress
-            $prefixLength = $networkConfig[0].IPv4Address.PrefixLength
-            
-            # Calcula rede base
-            $ipParts = $localIP.Split('.')
-            $NetworkRange = "$($ipParts[0]).$($ipParts[1]).$($ipParts[2]).*"
-            
-            Write-Host "Rede detectada: $NetworkRange (baseada no IP local: $localIP)" -ForegroundColor Cyan
-        } else {
-            Write-Host "Não foi possível detectar a rede automaticamente." -ForegroundColor Red
-            Write-Host "Especifique o range de rede manualmente:" -ForegroundColor Yellow
-            Write-Host "  Exemplo: .\scan-printer-oids.ps1 -NetworkRange '192.168.1.*'" -ForegroundColor Gray
-            return
-        }
-    }
-    
-    # Executa varredura de rede
-    $foundPrinters = Start-NetworkPrinterScan -NetworkRange $NetworkRange -Community $Community
-    
-    if ($foundPrinters.Count -eq 0) {
-        Write-Host "`nNenhuma impressora encontrada. Encerrando." -ForegroundColor Yellow
-        return
-    }
-    
-    # Permite seleção de impressora para varredura de OIDs
-    Write-Host "`n===============================================" -ForegroundColor Magenta
-    Write-Host "SELECAO DE IMPRESSORA PARA VARREDURA DE OIDS" -ForegroundColor Magenta
-    Write-Host "===============================================" -ForegroundColor Magenta
-    
-    if ($foundPrinters.Count -eq 1) {
-        $selectedPrinter = $foundPrinters[0]
-        Write-Host "Apenas uma impressora encontrada. Selecionando automaticamente:" -ForegroundColor Green
-        Write-Host "IP: $($selectedPrinter.IP) - $($selectedPrinter.Model)" -ForegroundColor White
-        $PrinterIP = $selectedPrinter.IP
-    } else {
-        Write-Host "Múltiplas impressoras encontradas. Selecione uma:" -ForegroundColor Yellow
-        
-        for ($i = 0; $i -lt $foundPrinters.Count; $i++) {
-            $printer = $foundPrinters[$i]
-            Write-Host "$($i + 1). $($printer.IP) - $($printer.Model)" -ForegroundColor White
-        }
-        
-        Write-Host "$($foundPrinters.Count + 1). Escanear todas as impressoras" -ForegroundColor Cyan
-        Write-Host "0. Cancelar" -ForegroundColor Red
-        
-        do {
-            $selection = Read-Host "`nDigite o número da opção"
-            $selectionInt = 0
-            $validSelection = [int]::TryParse($selection, [ref]$selectionInt)
-        } while (-not $validSelection -or $selectionInt -lt 0 -or $selectionInt -gt ($foundPrinters.Count + 1))
-        
-        if ($selectionInt -eq 0) {
-            Write-Host "Operação cancelada." -ForegroundColor Yellow
-            return
-        } elseif ($selectionInt -eq ($foundPrinters.Count + 1)) {
-            # Escanear todas as impressoras
-            Write-Host "`nIniciando varredura de OIDs em todas as impressoras..." -ForegroundColor Green
-            
-            foreach ($printer in $foundPrinters) {
-                Write-Host "`n" + "="*60 -ForegroundColor Yellow
-                Write-Host "ESCANEANDO: $($printer.IP) - $($printer.Model)" -ForegroundColor Magenta
-                Write-Host "="*60 -ForegroundColor Yellow
-                
-                $global:PrinterIP = $printer.IP
-                Start-PrinterOIDScan
-            }
-            return
-        } else {
-            $selectedPrinter = $foundPrinters[$selectionInt - 1]
-            $PrinterIP = $selectedPrinter.IP
-            Write-Host "`nImpressora selecionada: $($selectedPrinter.IP) - $($selectedPrinter.Model)" -ForegroundColor Green
-        }
-    }
-}
-
-# Verifica se foi especificado um IP específico
-if ([string]::IsNullOrWhiteSpace($PrinterIP)) {
-    Write-Host "`nErro: IP da impressora não especificado." -ForegroundColor Red
-    Write-Host "Use uma das opções:" -ForegroundColor Yellow
-    Write-Host "  .\scan-printer-oids.ps1 -PrinterIP 192.168.1.100" -ForegroundColor Gray
-    Write-Host "  .\scan-printer-oids.ps1 -NetworkRange '192.168.1.*'" -ForegroundColor Gray
-    Write-Host "  .\scan-printer-oids.ps1 -NetworkScan" -ForegroundColor Gray
-    return
-}
-
-Write-Host "`nIniciando varredura de OIDs para impressora $PrinterIP..." -ForegroundColor Cyan
-
-if ($QuickScan) {
-    Write-Host "Modo Quick Scan: Apenas OIDs essenciais" -ForegroundColor Yellow
-    $KnownOIDs = @{
-        "Essenciais" = @{
-            "1.3.6.1.2.1.1.1.0" = "Descrição do Sistema"
-            "1.3.6.1.2.1.43.10.2.1.4.1.1" = "Contador de páginas"
-            "1.3.6.1.2.1.43.5.1.1.17.1" = "Número de série"
-            "1.3.6.1.2.1.1.5.0" = "Nome do Sistema"
-        }
-    }
-}
-
-Start-PrinterOIDScan
-
-# Função para gerar lista de IPs de uma rede
-function Get-NetworkIPs {
-    param(
-        [string]$NetworkRange
-    )
-    
-    $ips = @()
-    
-    # Suporte para diferentes formatos de rede
-    if ($NetworkRange -match '^(\d+\.\d+\.\d+\.)(\d+)-(\d+)$') {
-        # Formato: 192.168.1.1-254
-        $baseNetwork = $matches[1]
-        $startRange = [int]$matches[2]
-        $endRange = [int]$matches[3]
-        
-        for ($i = $startRange; $i -le $endRange; $i++) {
-            $ips += "$baseNetwork$i"
-        }
-    }
-    elseif ($NetworkRange -match '^(\d+\.\d+\.\d+\.\d+)/(\d+)$') {
-        # Formato CIDR: 192.168.1.0/24
-        $networkAddr = $matches[1]
-        $cidr = [int]$matches[2]
-        
-        $ip = [System.Net.IPAddress]::Parse($networkAddr)
-        $mask = [System.Net.IPAddress]::Parse((ConvertTo-SubnetMask -CIDR $cidr))
-        
-        # Calcula rede e broadcast
-        $networkInt = [System.BitConverter]::ToUInt32($ip.GetAddressBytes(), 0)
-        $maskInt = [System.BitConverter]::ToUInt32($mask.GetAddressBytes(), 0)
-        $networkStart = $networkInt -band $maskInt
-        $networkEnd = $networkStart -bor (-bnot $maskInt)
-        
-        for ($i = $networkStart + 1; $i -lt $networkEnd; $i++) {
-            $ipBytes = [System.BitConverter]::GetBytes($i)
-            $ips += [System.Net.IPAddress]::new($ipBytes).ToString()
-        }
-    }
-    elseif ($NetworkRange -match '^(\d+\.\d+\.\d+\.\*)$') {
-        # Formato: 192.168.1.*
-        $baseNetwork = $NetworkRange -replace '\*', ''
-        for ($i = 1; $i -le 254; $i++) {
-            $ips += "$baseNetwork$i"
-        }
-    }
-    else {
-        Write-Host "Formato de rede não suportado. Use:" -ForegroundColor Red
-        Write-Host "  192.168.1.1-254" -ForegroundColor Gray
-        Write-Host "  192.168.1.0/24" -ForegroundColor Gray  
-        Write-Host "  192.168.1.*" -ForegroundColor Gray
-        return @()
-    }
-    
-    return $ips
-}
-
-# Função para converter CIDR em máscara de sub-rede
-function ConvertTo-SubnetMask {
-    param([int]$CIDR)
-    
-    $mask = [Math]::Pow(2, 32) - [Math]::Pow(2, (32 - $CIDR))
-    $bytes = [System.BitConverter]::GetBytes([UInt32]$mask)
-    return [System.Net.IPAddress]::new($bytes[3], $bytes[2], $bytes[1], $bytes[0]).ToString()
-}
-
-# Função para testar se um IP tem SNMP habilitado
-function Test-SNMPDevice {
-    param(
-        [string]$IpAddress,
-        [string]$Community = "public",
-        [int]$TimeoutSeconds = 2
-    )
-    
-    try {
-        $snmpgetPath = Join-Path $PSScriptRoot "snmp\snmpget.exe"
-        
-        if (-not (Test-Path $snmpgetPath)) {
-            return $null
-        }
-        
-        # Testa OID básico do sistema (sysDescr) com timeout curto
-        $result = & $snmpgetPath -v2c -c $Community -t $TimeoutSeconds -r 1 -On -Oe $IpAddress "1.3.6.1.2.1.1.1.0" 2>&1
-        
-        if ($LASTEXITCODE -eq 0 -and $result -and $result -notlike "*Timeout*" -and $result -notlike "*No Such*") {
-            # Converte resultado para string
-            if ($result -is [array]) {
-                $resultText = $result -join "`n"
-            } else {
-                $resultText = $result.ToString()
-            }
-            
-            # Extrai valor da descrição do sistema
-            if ($resultText -match 'STRING:\s*"([^"]*)"') {
-                return $matches[1]
-            } elseif ($resultText -match 'STRING:\s*([^\r\n]*)') {
-                return $matches[1].Trim()
-            }
-        }
-        
-        return $null
-    }
-    catch {
-        return $null
-    }
-}
-
-# Função para identificar se um dispositivo é uma impressora
-function Test-IsPrinter {
-    param(
-        [string]$SystemDescription
-    )
-    
-    if ([string]::IsNullOrWhiteSpace($SystemDescription)) {
-        return $false
-    }
-    
-    $printerKeywords = @(
-        "printer", "print", "laser", "inkjet", "multifunction", "mfc", "mfp",
-        "brother", "hp", "canon", "epson", "xerox", "lexmark", "kyocera",
-        "laserjet", "deskjet", "officejet", "imagerunner", "workforce",
-        "copystar", "ricoh", "sharp", "konica", "bizhub", "taskalfa"
-    )
-    
-    $description = $SystemDescription.ToLower()
-    
-    foreach ($keyword in $printerKeywords) {
-        if ($description -contains $keyword -or $description -like "*$keyword*") {
-            return $true
-        }
-    }
-    
-    return $false
-}
-
-# Função para extrair modelo da impressora da descrição
-function Get-PrinterModel {
-    param(
-        [string]$SystemDescription
-    )
-    
-    if ([string]::IsNullOrWhiteSpace($SystemDescription)) {
-        return "Modelo Desconhecido"
-    }
-    
-    # Remove caracteres de controle e limpa a string
-    $cleanDescription = $SystemDescription -replace '[^\x20-\x7E]', '' -replace '\s+', ' '
-    $cleanDescription = $cleanDescription.Trim()
-    
-    # Tenta extrair modelo específico
-    if ($cleanDescription -match '(Brother\s+[A-Z0-9\-]+)') {
-        return $matches[1]
-    }
-    elseif ($cleanDescription -match '(HP\s+\w+[\w\s\-]+)') {
-        return $matches[1]
-    }
-    elseif ($cleanDescription -match '(Canon\s+[\w\s\-]+)') {
-        return $matches[1]
-    }
-    elseif ($cleanDescription -match '(Xerox\s+[\w\s\-]+)') {
-        return $matches[1]
-    }
-    elseif ($cleanDescription -match '(Lexmark\s+[\w\s\-]+)') {
-        return $matches[1]
-    }
-    else {
-        # Se não conseguir extrair modelo específico, retorna os primeiros 50 caracteres
-        if ($cleanDescription.Length -gt 50) {
-            return $cleanDescription.Substring(0, 50) + "..."
-        }
-        return $cleanDescription
-    }
-}
-
-# Função para varredura de rede em busca de impressoras
-function Start-NetworkPrinterScan {
-    param(
-        [string]$NetworkRange,
-        [string]$Community = "public"
-    )
-    
-    Write-Host "===============================================" -ForegroundColor Cyan
-    Write-Host "VARREDURA DE REDE - PROCURANDO IMPRESSORAS" -ForegroundColor Cyan
-    Write-Host "===============================================" -ForegroundColor Cyan
-    Write-Host "Rede: $NetworkRange" -ForegroundColor White
-    Write-Host "Comunidade SNMP: $Community" -ForegroundColor White
-    
-    # Gera lista de IPs para testar
-    Write-Host "`nGerando lista de IPs para verificar..." -ForegroundColor Yellow
-    $ips = Get-NetworkIPs -NetworkRange $NetworkRange
-    
-    if ($ips.Count -eq 0) {
-        Write-Host "Erro: Não foi possível gerar lista de IPs" -ForegroundColor Red
-        return @()
-    }
-    
-    Write-Host "Total de IPs para verificar: $($ips.Count)" -ForegroundColor Cyan
-    Write-Host "Iniciando varredura SNMP..." -ForegroundColor Yellow
-    Write-Host "(Isso pode demorar alguns minutos dependendo do tamanho da rede)" -ForegroundColor Gray
-    
-    $foundDevices = @()
-    $printers = @()
-    $currentIP = 0
-    $totalIPs = $ips.Count
-    
-    foreach ($ip in $ips) {
-        $currentIP++
-        
-        # Mostra progresso a cada 10 IPs
-        if ($currentIP % 10 -eq 0 -or $currentIP -eq $totalIPs) {
-            $percentage = [math]::Round(($currentIP / $totalIPs) * 100, 1)
-            Write-Host "Progresso: $currentIP/$totalIPs ($percentage%) - Verificando $ip" -ForegroundColor Gray
-        }
-        
-        # Testa SNMP no IP
-        $systemDescription = Test-SNMPDevice -IpAddress $ip -Community $Community -TimeoutSeconds 2
-        
-        if ($systemDescription) {
-            $foundDevices += @{
-                IP = $ip
-                Description = $systemDescription
-            }
-            
-            # Verifica se é uma impressora
-            if (Test-IsPrinter -Description $systemDescription) {
-                $model = Get-PrinterModel -Description $systemDescription
-                $printers += @{
-                    IP = $ip
-                    Description = $systemDescription
-                    Model = $model
-                }
-                Write-Host "✓ Impressora encontrada: $ip - $model" -ForegroundColor Green
-            } else {
-                Write-Host "• Dispositivo SNMP: $ip - $($systemDescription.Substring(0, [Math]::Min(50, $systemDescription.Length)))..." -ForegroundColor Yellow
-            }
-        }
-    }
-    
-    Write-Host "`n===============================================" -ForegroundColor Cyan
-    Write-Host "RESULTADO DA VARREDURA" -ForegroundColor Cyan
-    Write-Host "===============================================" -ForegroundColor Cyan
-    Write-Host "Dispositivos SNMP encontrados: $($foundDevices.Count)" -ForegroundColor White
-    Write-Host "Impressoras encontradas: $($printers.Count)" -ForegroundColor Green
-    
-    if ($printers.Count -eq 0) {
-        Write-Host "`nNenhuma impressora encontrada na rede especificada." -ForegroundColor Red
-        Write-Host "Verifique se:" -ForegroundColor Yellow
-        Write-Host "- As impressoras estão ligadas e conectadas à rede" -ForegroundColor Yellow
-        Write-Host "- O SNMP está habilitado nas impressoras" -ForegroundColor Yellow
-        Write-Host "- A community string está correta (padrão: 'public')" -ForegroundColor Yellow
-        Write-Host "- O range de rede está correto" -ForegroundColor Yellow
-        return $null
-    }
-    
-    # Exibe lista de impressoras encontradas
-    Write-Host "`n===============================================" -ForegroundColor Green
-    Write-Host "IMPRESSORAS ENCONTRADAS" -ForegroundColor Green
-    Write-Host "===============================================" -ForegroundColor Green
-    
-    for ($i = 0; $i -lt $printers.Count; $i++) {
-        $printer = $printers[$i]
-        Write-Host "$($i + 1). $($printer.IP) - $($printer.Model)" -ForegroundColor White
-    }
-    
-    # Permite seleção de impressora ou todas
-    Write-Host "`n===============================================" -ForegroundColor Cyan
-    Write-Host "SELEÇÃO DE IMPRESSORA" -ForegroundColor Cyan
-    Write-Host "===============================================" -ForegroundColor Cyan
-    Write-Host "Digite o número da impressora para varredura de OIDs" -ForegroundColor White
-    Write-Host "Digite 'A' para varrer todas as impressoras" -ForegroundColor White
-    Write-Host "Digite 'S' para sair sem varredura" -ForegroundColor White
-    
-    do {
-        $selection = Read-Host "`nSua escolha"
-        
-        if ($selection -eq 'S' -or $selection -eq 's') {
-            Write-Host "Saindo..." -ForegroundColor Yellow
-            return $null
-        }
-        
-        if ($selection -eq 'A' -or $selection -eq 'a') {
-            return $printers
-        }
-        
-        if ($selection -match '^\d+$') {
-            $index = [int]$selection - 1
-            if ($index -ge 0 -and $index -lt $printers.Count) {
-                return @($printers[$index])
-            }
-        }
-        
-        Write-Host "Seleção inválida. Digite um número válido, 'A' para todas ou 'S' para sair." -ForegroundColor Red
-    } while ($true)
-}
-
 # ===============================================
-# FLUXO PRINCIPAL
+# FLUXO PRINCIPAL DE EXECUÇÃO
 # ===============================================
 
-Write-Host "===============================================" -ForegroundColor Cyan
-Write-Host "SCANNER DE OIDS PARA IMPRESSORAS" -ForegroundColor Cyan
-Write-Host "===============================================" -ForegroundColor Cyan
-
-# Determinar o modo de operação
+# Verifica se deve fazer varredura de rede ou IP direto
 if ($NetworkScan -or $NetworkRange) {
     # Modo varredura de rede
+    Write-Host "===============================================" -ForegroundColor Cyan
+    Write-Host "MODO: VARREDURA DE REDE" -ForegroundColor Cyan
+    Write-Host "===============================================" -ForegroundColor Cyan
     
     if (-not $NetworkRange) {
         # Detectar rede local automaticamente
@@ -899,22 +488,43 @@ if ($NetworkScan -or $NetworkRange) {
         Write-Host "Impressora: $($printer.IP) - $($printer.Model)" -ForegroundColor Magenta
         Write-Host "===============================================" -ForegroundColor Magenta
         
-        Start-PrinterOIDScan -PrinterIP $printer.IP -Community $Community -FullScan:$FullScan -ExportConfig:$ExportConfig -OutputFile $OutputFile -QuickScan:$QuickScan
+        # Atualiza variável global para a função Start-PrinterOIDScan
+        $global:PrinterIP = $printer.IP
+        Start-PrinterOIDScan
     }
     
 } else {
     # Modo varredura direta de IP
+    Write-Host "===============================================" -ForegroundColor Cyan
+    Write-Host "MODO: VARREDURA DIRETA DE IP" -ForegroundColor Cyan
+    Write-Host "===============================================" -ForegroundColor Cyan
     
     if (-not $PrinterIP) {
         $PrinterIP = Read-Host "Digite o IP da impressora"
     }
     
-    Write-Host "Modo: Varredura direta de IP" -ForegroundColor Green
     Write-Host "IP da impressora: $PrinterIP" -ForegroundColor White
+    Write-Host "Comunidade SNMP: $Community" -ForegroundColor White
     
-    Start-PrinterOIDScan -PrinterIP $PrinterIP -Community $Community -FullScan:$FullScan -ExportConfig:$ExportConfig -OutputFile $OutputFile -QuickScan:$QuickScan
+    if ($QuickScan) {
+        Write-Host "Modo Quick Scan: Apenas OIDs essenciais" -ForegroundColor Yellow
+        $global:KnownOIDs = @{
+            "Essenciais" = @{
+                "1.3.6.1.2.1.1.1.0" = "Descrição do Sistema"
+                "1.3.6.1.2.1.43.10.2.1.4.1.1" = "Contador de páginas"
+                "1.3.6.1.2.1.43.5.1.1.17.1" = "Número de série"
+                "1.3.6.1.2.1.1.5.0" = "Nome do Sistema"
+            }
+        }
+    }
+    
+    # Atualiza variável global para a função Start-PrinterOIDScan
+    $global:PrinterIP = $PrinterIP
+    Start-PrinterOIDScan
 }
 
-Write-Host "`n===============================================" -ForegroundColor Cyan
-Write-Host "VARREDURA CONCLUÍDA" -ForegroundColor Cyan
-Write-Host "===============================================" -ForegroundColor Cyan
+Write-Host "`n===============================================" -ForegroundColor Green
+Write-Host "VARREDURA CONCLUÍDA COM SUCESSO" -ForegroundColor Green
+Write-Host "===============================================" -ForegroundColor Green
+
+
