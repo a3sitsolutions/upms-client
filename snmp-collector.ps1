@@ -573,6 +573,141 @@ function Retry-LocalData {
     }
 }
 
+# Funcao para verificar e atualizar repositorio Git
+function Update-GitRepository {
+    param(
+        [string]$RepositoryUrl = "git@github.com:a3sitsolutions/upms-client.git"
+    )
+    
+    Write-Host "`n=== Verificando atualizacoes do repositorio Git ===" -ForegroundColor Cyan
+    Write-Host "Repositorio: $RepositoryUrl" -ForegroundColor Gray
+    
+    try {
+        # Verifica se estamos em um repositorio Git
+        $gitDir = Join-Path $PSScriptRoot ".git"
+        if (-not (Test-Path $gitDir)) {
+            Write-Host "     Aviso: Diretorio nao e um repositorio Git - pulando verificacao" -ForegroundColor Yellow
+            return $true
+        }
+        
+        # Verifica se git esta disponivel
+        $gitCommand = Get-Command git -ErrorAction SilentlyContinue
+        if (-not $gitCommand) {
+            Write-Host "     Aviso: Git nao encontrado no sistema - pulando verificacao" -ForegroundColor Yellow
+            return $true
+        }
+        
+        Write-Host "     Verificando status do repositorio..." -ForegroundColor Gray
+        
+        # Muda para o diretorio do script
+        Push-Location $PSScriptRoot
+        
+        try {
+            # Verifica se ha mudancas locais nao commitadas
+            $gitStatus = git status --porcelain 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "     Erro ao verificar status Git: $gitStatus" -ForegroundColor Red
+                return $false
+            }
+            
+            if ($gitStatus) {
+                Write-Host "     Aviso: Ha mudancas locais nao commitadas" -ForegroundColor Yellow
+                Write-Host "     Stashing mudancas locais temporariamente..." -ForegroundColor Gray
+                
+                # Salva mudancas locais temporariamente
+                $stashResult = git stash push -m "Auto-stash antes de update $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" 2>&1
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "     Erro ao fazer stash: $stashResult" -ForegroundColor Red
+                    return $false
+                }
+                Write-Host "     Mudancas locais salvas temporariamente" -ForegroundColor Green
+            }
+            
+            # Busca atualizacoes do repositorio remoto
+            Write-Host "     Buscando atualizacoes do repositorio remoto..." -ForegroundColor Gray
+            $fetchResult = git fetch origin 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "     Erro ao buscar atualizacoes: $fetchResult" -ForegroundColor Red
+                return $false
+            }
+            
+            # Verifica se ha atualizacoes disponiveis
+            $currentBranch = git rev-parse --abbrev-ref HEAD 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "     Erro ao obter branch atual: $currentBranch" -ForegroundColor Red
+                return $false
+            }
+            
+            $localCommit = git rev-parse HEAD 2>&1
+            $remoteCommit = git rev-parse "origin/$currentBranch" 2>&1
+            
+            if ($localCommit -eq $remoteCommit) {
+                Write-Host "     Repositorio ja esta atualizado!" -ForegroundColor Green
+                
+                # Se houve stash, restaura as mudancas
+                if ($gitStatus) {
+                    Write-Host "     Restaurando mudancas locais..." -ForegroundColor Gray
+                    $popResult = git stash pop 2>&1
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-Host "     Mudancas locais restauradas" -ForegroundColor Green
+                    } else {
+                        Write-Host "     Aviso: Erro ao restaurar mudancas: $popResult" -ForegroundColor Yellow
+                    }
+                }
+                
+                return $true
+            }
+            
+            # Ha atualizacoes disponiveis - forca update
+            Write-Host "     Atualizacoes encontradas! Fazendo pull forcado..." -ForegroundColor Yellow
+            $pullResult = git pull origin $currentBranch 2>&1
+            
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "     Repositorio atualizado com sucesso!" -ForegroundColor Green
+                
+                # Se houve stash, tenta restaurar as mudancas
+                if ($gitStatus) {
+                    Write-Host "     Tentando restaurar mudancas locais..." -ForegroundColor Gray
+                    $popResult = git stash pop 2>&1
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-Host "     Mudancas locais restauradas" -ForegroundColor Green
+                    } else {
+                        Write-Host "     Conflito ao restaurar mudancas. Verifique manualmente:" -ForegroundColor Yellow
+                        Write-Host "     $popResult" -ForegroundColor Gray
+                        Write-Host "     Use 'git stash list' e 'git stash pop' para resolver" -ForegroundColor Gray
+                    }
+                }
+                
+                return $true
+            } else {
+                Write-Host "     Erro ao fazer pull: $pullResult" -ForegroundColor Red
+                
+                # Em caso de erro, tenta reset hard para forcar atualizacao
+                Write-Host "     Tentando reset forcado para a versao remota..." -ForegroundColor Yellow
+                $resetResult = git reset --hard "origin/$currentBranch" 2>&1
+                
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Host "     Reset forcado realizado com sucesso!" -ForegroundColor Green
+                    Write-Host "     ATENCAO: Mudancas locais foram perdidas!" -ForegroundColor Red
+                    return $true
+                } else {
+                    Write-Host "     Erro no reset forcado: $resetResult" -ForegroundColor Red
+                    return $false
+                }
+            }
+        }
+        finally {
+            # Retorna ao diretorio original
+            Pop-Location
+        }
+    }
+    catch {
+        Write-Host "     Erro na verificacao Git: $($_.Exception.Message)" -ForegroundColor Red
+        Pop-Location -ErrorAction SilentlyContinue
+        return $false
+    }
+}
+
 # Funcao principal
 function Read-PrintersConfigAndQuery {
     # Se modo RetryOnly, apenas tenta reenviar dados salvos
@@ -587,6 +722,14 @@ function Read-PrintersConfigAndQuery {
             Write-Host "Servidor indisponivel. Nao e possivel reenviar dados no momento." -ForegroundColor Red
         }
         return
+    }
+    
+    # Verifica e atualiza repositorio Git antes da execucao principal
+    Write-Host "Verificando atualizacoes do repositorio..." -ForegroundColor Cyan
+    $gitUpdateSuccess = Update-GitRepository
+    if (-not $gitUpdateSuccess) {
+        Write-Host "Aviso: Problemas na atualizacao do repositorio Git" -ForegroundColor Yellow
+        Write-Host "Continuando execucao com versao atual..." -ForegroundColor Yellow
     }
     
     # Instala e importa modulo YAML

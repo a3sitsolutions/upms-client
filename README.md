@@ -376,12 +376,39 @@ Para configurar manualmente no Agendador de Tarefas:
 
 ### 🔄 Fluxo Automático Completo
 ```
-Hora 08:00 → Task Scheduler → snmp-collector.ps1 → Coleta + Envia → Status: "sent"
-Hora 09:00 → Task Scheduler → snmp-collector.ps1 → Já enviado hoje → Pula
-Hora 10:00 → Task Scheduler → snmp-collector.ps1 → Já enviado hoje → Pula
+Hora 08:00 → Task Scheduler → snmp-collector.ps1 → Verificação Git → Coleta + Envia → Status: "sent"
+Hora 09:00 → Task Scheduler → snmp-collector.ps1 → Verificação Git → Já enviado hoje → Pula
+Hora 10:00 → Task Scheduler → snmp-collector.ps1 → Verificação Git → Já enviado hoje → Pula
 ...
 Dia seguinte → Novo ciclo completo
 ```
+
+### 🔄 Verificação e Atualização Automática do Git
+
+**O script automaticamente verifica e atualiza o repositório Git antes de cada execução principal:**
+
+**Funcionalidades:**
+- ✅ **Detecção automática** de repositório Git
+- ✅ **Stash automático** de mudanças locais
+- ✅ **Fetch e verificação** de atualizações remotas
+- ✅ **Pull automático** se houver atualizações
+- ✅ **Restauração** de mudanças locais após atualização
+- ✅ **Reset forçado** em caso de conflitos
+- ✅ **Fallback gracioso** se Git não estiver disponível
+
+**Comportamento:**
+1. **Mudanças locais**: Salva automaticamente com `git stash`
+2. **Busca atualizações**: `git fetch origin`
+3. **Compara versões**: Local vs. Remoto
+4. **Atualiza se necessário**: `git pull` automático
+5. **Restaura mudanças**: `git stash pop` das mudanças locais
+6. **Continua execução**: Mesmo se houver problemas Git
+
+**Casos especiais:**
+- **Sem Git**: Continua execução normalmente com aviso
+- **Sem repositório**: Pula verificação com aviso
+- **Conflitos**: Tenta reset forçado se necessário
+- **Falhas**: Continua com versão atual
 
 ### 🧹 Manutenção Automática (Opcional)
 Configure limpeza automática de dados antigos:
