@@ -1,4 +1,4 @@
-# Script para varredura de OIDs em impressoras
+﻿# Script para varredura de OIDs em impressoras
 # Descobre automaticamente OIDs para páginas impressas, modelo, número de série, etc.
 
 param(
@@ -841,7 +841,6 @@ if ($NetworkScan -or $NetworkRange -or $ScanAll) {
     # Atualiza variável global para a função Start-PrinterOIDScan
     $global:PrinterIP = $PrinterIP
     Start-PrinterOIDScan
-}
 }
 
 Write-Host "`n===============================================" -ForegroundColor Green
