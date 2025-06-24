@@ -670,8 +670,8 @@ function Start-NetworkPrinterScan {
             }
             
             # Verifica se é uma impressora
-            if (Test-IsPrinter -Description $systemDescription) {
-                $model = Get-PrinterModel -Description $systemDescription
+            if (Test-IsPrinter -SystemDescription $systemDescription) {
+                $model = Get-PrinterModel -SystemDescription $systemDescription
                 $printers += @{
                     IP = $ip
                     Description = $systemDescription
