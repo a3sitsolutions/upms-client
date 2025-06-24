@@ -1,0 +1,43 @@
+# SNMP Walk Results
+# Generated on: 2025-06-24 17:13:50
+
+device_info:
+  ip: '192.168.1.200'
+  model: 'HP LaserJet Pro M404dn'
+  name: 'PRINTER-SALA-01'
+  description: 'HP LaserJet Pro M404dn'
+
+snmp_data:
+  '1.3.6.1.2.1.1.1.0':
+    type: 'STRING'
+    value: 'HP LaserJet Pro M404dn'
+  '1.3.6.1.2.1.1.2.0':
+    type: 'OID'
+    value: '1.3.6.1.4.1.11.2.3.9.1'
+  '1.3.6.1.2.1.1.3.0':
+    type: 'Timeticks'
+    value: '(123456789) 14 days, 6:56:07.89'
+  '1.3.6.1.2.1.1.4.0':
+    type: 'STRING'
+    value: 'admin@empresa.com'
+  '1.3.6.1.2.1.1.5.0':
+    type: 'STRING'
+    value: 'PRINTER-SALA-01'
+  '1.3.6.1.2.1.1.6.0':
+    type: 'STRING'
+    value: 'Sala de reunioes - Andar 2'
+  '1.3.6.1.2.1.25.3.2.1.3.1':
+    type: 'STRING'
+    value: 'HP LaserJet Pro M404dn'
+  '1.3.6.1.2.1.43.5.1.1.16.1':
+    type: 'STRING'
+    value: 'Ready'
+  '1.3.6.1.2.1.43.10.2.1.4.1.1':
+    type: 'INTEGER'
+    value: '50'
+  '1.3.6.1.2.1.43.11.1.1.6.1.1':
+    type: 'Counter32'
+    value: '12345'
+  '1.3.6.1.2.1.43.11.1.1.9.1.1':
+    type: 'Counter32'
+    value: '987'
