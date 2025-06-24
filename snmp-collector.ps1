@@ -126,6 +126,14 @@ function Get-SimulatedPrinterData {
             "1.3.6.1.2.1.43.5.1.1.17.1" = "U63885F9N733180"
             "1.3.6.1.2.1.1.5.0" = "BRW105BAD6F5F7A"
         }
+        # EPSON L4260 Series
+        "EPSON" = @{
+            "1.3.6.1.2.1.43.10.2.1.4.1.1" = "4105"
+            "1.3.6.1.2.1.43.5.1.1.16.1" = "L4260 Series"
+            "1.3.6.1.2.1.43.5.1.1.17.1" = "XAA9230124"
+            "1.3.6.1.2.1.1.5.0" = "EPSON16BB1F"
+            "1.3.6.1.2.1.1.1.0" = "EPSON Built-in 11b/g/n Print Server"
+        }
         # HP LaserJet
         "HP" = @{
             "1.3.6.1.2.1.43.10.2.1.4.1.1" = "15247"
@@ -146,6 +154,7 @@ function Get-SimulatedPrinterData {
     $brand = "Brother"  # Default
     if ($PrinterModel -like "*HP*") { $brand = "HP" }
     elseif ($PrinterModel -like "*Canon*") { $brand = "Canon" }
+    elseif ($PrinterModel -like "*EPSON*") { $brand = "EPSON" }
     
     if ($simulatedData[$brand] -and $simulatedData[$brand][$OID]) {
         return $simulatedData[$brand][$OID]
@@ -322,13 +331,13 @@ function Check-DailySubmission {
     $localDataFile = Join-Path $localDataDir "local-data.json"
     
     if (-not (Test-Path $localDataFile)) {
-        return @{ alreadySent = $false; hasPending = $false }
+        return @{ alreadySent = $false; hasPending = $false; hasAnyRecord = $false }
     }
     
     try {
         $fileContent = Get-Content $localDataFile -Raw
         if (-not $fileContent) {
-            return @{ alreadySent = $false; hasPending = $false }
+            return @{ alreadySent = $false; hasPending = $false; hasAnyRecord = $false }
         }
         
         $dataEntries = ConvertFrom-Json $fileContent
@@ -349,14 +358,30 @@ function Check-DailySubmission {
             $_.time -eq $CollectionDate -and 
             $_.status -eq "pending" 
         }
-          return @{ 
+        
+        # Verifica se tem registro not_found para hoje (também conta como "processado")
+        $notFoundEntry = $dataEntries | Where-Object { 
+            $_.printerIP -eq $PrinterIP -and 
+            $_.time -eq $CollectionDate -and 
+            $_.status -eq "not_found" 
+        }
+        
+        # Verifica se há QUALQUER registro para esta impressora hoje
+        $anyRecord = $dataEntries | Where-Object { 
+            $_.printerIP -eq $PrinterIP -and 
+            $_.time -eq $CollectionDate 
+        }
+        
+        return @{ 
             alreadySent = ($null -ne $successEntry)
             hasPending = ($null -ne $pendingEntry)
+            hasNotFound = ($null -ne $notFoundEntry)
+            hasAnyRecord = ($null -ne $anyRecord)
         }
     }
     catch {
         Write-Host "     Erro ao verificar envios diarios: $($_.Exception.Message)" -ForegroundColor Red
-        return @{ alreadySent = $false; hasPending = $false }
+        return @{ alreadySent = $false; hasPending = $false; hasAnyRecord = $false }
     }
 }
 
@@ -413,11 +438,10 @@ function Save-DataLocally {
             }
         }
         
-        # Se for status "sent", remove qualquer entrada anterior para mesma impressora/data
-        if ($Status -eq "sent") {
-            $existingData = $existingData | Where-Object { 
-                -not ($_.printerIP -eq $PrinterIP -and $_.time -eq $CollectionTime) 
-            }
+        # Remove QUALQUER entrada anterior para mesma impressora/data antes de adicionar nova
+        # Isso garante que não haverá duplicatas para o mesmo dia
+        $existingData = $existingData | Where-Object { 
+            -not ($_.printerIP -eq $PrinterIP -and $_.time -eq $CollectionTime) 
         }
         
         # Adiciona nova entrada (conversão segura para array)
@@ -713,6 +737,45 @@ function Update-GitRepository {
     }
 }
 
+# Funcao para verificar se impressora já foi processada hoje (verificação extra de segurança)
+function Test-PrinterAlreadyProcessedToday {
+    param(
+        [string]$PrinterIP,
+        [string]$CollectionDate
+    )
+    
+    $localDataDir = Join-Path $PSScriptRoot "local-data"
+    $localDataFile = Join-Path $localDataDir "local-data.json"
+    
+    if (-not (Test-Path $localDataFile)) {
+        return $false
+    }
+    
+    try {
+        $fileContent = Get-Content $localDataFile -Raw
+        if (-not $fileContent) {
+            return $false
+        }
+        
+        $dataEntries = ConvertFrom-Json $fileContent
+        if ($dataEntries -isnot [System.Array]) {
+            $dataEntries = @($dataEntries)
+        }
+        
+        # Verifica se há QUALQUER registro com status "sent" para esta impressora hoje
+        $processedEntry = $dataEntries | Where-Object { 
+            $_.printerIP -eq $PrinterIP -and 
+            $_.time -eq $CollectionDate -and 
+            $_.status -eq "sent"
+        }
+        
+        return ($null -ne $processedEntry)
+    }
+    catch {
+        return $false
+    }
+}
+
 # Funcao principal
 function Read-PrintersConfigAndQuery {
     # Se modo RetryOnly, apenas tenta reenviar dados salvos
@@ -805,6 +868,17 @@ function Read-PrintersConfigAndQuery {
             $totalPagesData = 0
             $collectionTime = Get-Date -Format "yyyy-MM-dd"
             
+            # VERIFICAÇÃO EXTRA: Se não for modo teste, verifica se já foi processado hoje
+            if (-not $TestMode) {
+                $alreadyProcessed = Test-PrinterAlreadyProcessedToday -PrinterIP $printer.ip -CollectionDate $collectionTime
+                if ($alreadyProcessed) {
+                    Write-Host "`n⚠️  ATENÇÃO: Impressora já processada hoje com sucesso - pulando para evitar duplicatas" -ForegroundColor Red
+                    $successfulAPI++
+                    $totalProcessed++
+                    continue
+                }
+            }
+            
             # Consulta cada OID configurado para esta impressora
             Write-Host "`nConsultando informacoes da impressora:" -ForegroundColor Cyan
             
@@ -873,10 +947,16 @@ function Read-PrintersConfigAndQuery {
                     $dailyCheck = Check-DailySubmission -PrinterIP $printer.ip -CollectionDate $collectionTime
                     
                     if ($dailyCheck.alreadySent) {
-                        Write-Host "`n     Status: Dados ja enviados hoje - pulando envio" -ForegroundColor Green
+                        Write-Host "`n     Status: Dados ja enviados hoje com sucesso - pulando envio" -ForegroundColor Green
                         $successfulAPI++
+                    } elseif ($dailyCheck.hasNotFound) {
+                        Write-Host "`n     Status: Impressora marcada como 'nao encontrada' hoje - pulando envio" -ForegroundColor Yellow
+                        $savedLocally++
                     } elseif ($dailyCheck.hasPending) {
                         Write-Host "`n     Status: Tentativa pendente para hoje - sera processada no reenvio" -ForegroundColor Yellow
+                        $savedLocally++
+                    } elseif ($dailyCheck.hasAnyRecord) {
+                        Write-Host "`n     Status: Ja existe registro para hoje - pulando envio para evitar duplicatas" -ForegroundColor Cyan
                         $savedLocally++
                     } else {
                         # Verifica conectividade e envia/salva conforme necessario
@@ -890,7 +970,7 @@ function Read-PrintersConfigAndQuery {
                                 # Salva como 'sent' para controle diario
                                 Save-DataLocally -Model $modelData -SerialNumber $serialNumberData -TotalPrintedPages $totalPagesData -PrinterIP $printer.ip -ApiEndpoint $ApiEndpoint -CollectionTime $collectionTime -Status "sent"
                             } elseif ($apiResult.status -eq "not_found") {
-                                # Erro 404: salva como not_found (nao sera reenviado)
+                                # Erro 404: salva como not_found (nao sera reenviados)
                                 Write-Host "`n     Status: Impressora nao encontrada (404) - salvando como 'not_found'" -ForegroundColor Yellow
                                 $saveSuccess = Save-DataLocally -Model $modelData -SerialNumber $serialNumberData -TotalPrintedPages $totalPagesData -PrinterIP $printer.ip -ApiEndpoint $ApiEndpoint -CollectionTime $collectionTime -Status "not_found"
                                 if ($saveSuccess) {
