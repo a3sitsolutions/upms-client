@@ -1,9 +1,10 @@
 ﻿# Script para varredura de OIDs em impressoras
 # Descobre automaticamente OIDs para páginas impressas, modelo, número de série, etc.
 #
-# Uso rápido com timeout reduzido:
+# Uso rápido com timeout otimizado:
 # .\scan-printer-oids.ps1 -NetworkRange "192.168.1.0/24" -TimeoutSeconds 1
 # .\scan-printer-oids.ps1 -NetworkRange "192.168.1.0/24" -TimeoutSeconds 0.5 (para redes muito rápidas)
+# .\scan-printer-oids.ps1 -NetworkRange "192.168.1.1-50" -TimeoutSeconds 1 (range específico)
 
 param(
     [string]$PrinterIP = "",
@@ -651,27 +652,30 @@ function Start-NetworkPrinterScan {
     }
     
     Write-Host "Total de IPs para verificar: $($ips.Count)" -ForegroundColor Cyan
+    $estimatedTime = $ips.Count * $TimeoutSeconds
+    Write-Host "Tempo estimado: ~$estimatedTime segundos ($([math]::Round($estimatedTime/60, 1)) minutos)" -ForegroundColor Yellow
     Write-Host "Iniciando varredura SNMP..." -ForegroundColor Yellow
-    Write-Host "(Isso pode demorar alguns minutos dependendo do tamanho da rede)" -ForegroundColor Gray
+    Write-Host "(Cada IP será testado com timeout de $TimeoutSeconds segundo(s))" -ForegroundColor Gray
+    Write-Host ""
     
     $foundDevices = @()
     $printers = @()
     $currentIP = 0
     $totalIPs = $ips.Count
+    $startTime = Get-Date
     
     foreach ($ip in $ips) {
         $currentIP++
         
-        # Mostra progresso a cada 5 IPs ou no último
-        if ($currentIP % 5 -eq 0 -or $currentIP -eq $totalIPs) {
-            $percentage = [math]::Round(($currentIP / $totalIPs) * 100, 1)
-            Write-Host "Progresso: $currentIP/$totalIPs ($percentage%) - Verificando $ip" -ForegroundColor Gray
-        }
+        # Mostra qual IP está sendo verificado no momento
+        Write-Host "[$currentIP/$totalIPs] Verificando $ip..." -ForegroundColor Gray -NoNewline
         
         # Testa SNMP no IP
         $systemDescription = Test-SNMPDevice -IpAddress $ip -Community $Community -TimeoutSeconds $TimeoutSeconds
         
         if ($systemDescription) {
+            Write-Host " ✓ SNMP ativo" -ForegroundColor Green
+            
             $foundDevices += @{
                 IP = $ip
                 Description = $systemDescription
@@ -685,13 +689,37 @@ function Start-NetworkPrinterScan {
                     Description = $systemDescription
                     Model = $model
                 }
-                Write-Host "✓ Impressora encontrada: $ip - $model" -ForegroundColor Green
+                Write-Host "   🖨️  Impressora encontrada: $model" -ForegroundColor Green
             } else {
-                Write-Host "• Dispositivo SNMP: $ip - $($systemDescription.Substring(0, [Math]::Min(50, $systemDescription.Length)))..." -ForegroundColor Yellow
+                Write-Host "   📡 Dispositivo SNMP: $($systemDescription.Substring(0, [Math]::Min(40, $systemDescription.Length)))..." -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host " ✗ Sem resposta" -ForegroundColor DarkGray
+        }
+        
+        # Mostra progresso a cada 10 IPs ou no último
+        if ($currentIP % 10 -eq 0 -or $currentIP -eq $totalIPs) {
+            $percentage = [math]::Round(($currentIP / $totalIPs) * 100, 1)
+            $elapsedTime = (Get-Date) - $startTime
+            $elapsedSeconds = [math]::Round($elapsedTime.TotalSeconds, 1)
+            
+            if ($currentIP -gt 0) {
+                $avgTimePerIP = $elapsedTime.TotalSeconds / $currentIP
+                $remainingIPs = $totalIPs - $currentIP
+                $estimatedTimeLeft = $remainingIPs * $avgTimePerIP
+                $estimatedTimeLeftMin = [math]::Round($estimatedTimeLeft / 60, 1)
+                
+                Write-Host "📊 Progresso: $currentIP/$totalIPs ($percentage%) | Tempo: ${elapsedSeconds}s | Restante: ~${estimatedTimeLeftMin}min" -ForegroundColor Cyan
+            } else {
+                Write-Host "📊 Progresso: $currentIP/$totalIPs ($percentage%) | Tempo: ${elapsedSeconds}s" -ForegroundColor Cyan
             }
         }
     }
     
+    $totalTime = (Get-Date) - $startTime
+    $totalSeconds = [math]::Round($totalTime.TotalSeconds, 1)
+    
+    Write-Host "`n⏱️  Varredura concluída em $totalSeconds segundos" -ForegroundColor Cyan
     Write-Host "`n===============================================" -ForegroundColor Cyan
     Write-Host "RESULTADO DA VARREDURA" -ForegroundColor Cyan
     Write-Host "===============================================" -ForegroundColor Cyan
