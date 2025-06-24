@@ -420,8 +420,11 @@ function Save-DataLocally {
             }
         }
         
-        # Adiciona nova entrada
-        $existingData = $existingData + $dataEntry
+        # Adiciona nova entrada (conversão segura para array)
+        $updatedData = @()
+        $updatedData += $existingData
+        $updatedData += $dataEntry
+        $existingData = $updatedData
         
         # Salva dados atualizados
         $existingData | ConvertTo-Json -Depth 3 | Set-Content $localDataFile -Encoding UTF8
@@ -486,8 +489,10 @@ function Retry-LocalData {
         $totalNotFound = 0
         $updatedEntries = @()
         
-        # Mante registros "not_found" no arquivo
-        $updatedEntries += $notFoundEntries
+        # Mantém registros "not_found" no arquivo (conversão segura)
+        if ($notFoundEntries) {
+            $updatedEntries += $notFoundEntries
+        }
         
         foreach ($entry in $pendingEntries) {
             $totalRetried++
@@ -512,7 +517,7 @@ function Retry-LocalData {
                     sentTimestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
                     httpCode = $result.httpCode
                 }
-                $updatedEntries += $sentEntry            } elseif ($result.status -eq "not_found") {
+                $updatedEntries = $updatedEntries + @($sentEntry)            } elseif ($result.status -eq "not_found") {
                 $totalNotFound++
                 Write-Host "  Status: Impressora nao encontrada (404) - marcado como 'not_found'" -ForegroundColor Red
                 
@@ -530,7 +535,7 @@ function Retry-LocalData {
                     lastTryTimestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
                     httpCode = $result.httpCode
                 }
-                $updatedEntries += $notFoundEntry
+                $updatedEntries = $updatedEntries + @($notFoundEntry)
             } else {
                 Write-Host "  Status: Falha no reenvio - mantido como pendente" -ForegroundColor Red
                 
@@ -550,7 +555,7 @@ function Retry-LocalData {
                 if ($result.httpCode) {
                     $pendingEntry.lastHttpCode = $result.httpCode
                 }
-                $updatedEntries += $pendingEntry
+                $updatedEntries = $updatedEntries + @($pendingEntry)
             }
         }
           # Atualiza arquivo com registros atualizados
