@@ -1,5 +1,9 @@
-# Script para varredura de OIDs em impressoras
+﻿# Script para varredura de OIDs em impressoras
 # Descobre automaticamente OIDs para páginas impressas, modelo, número de série, etc.
+#
+# Uso rápido com timeout reduzido:
+# .\scan-printer-oids.ps1 -NetworkRange "192.168.1.0/24" -TimeoutSeconds 1
+# .\scan-printer-oids.ps1 -NetworkRange "192.168.1.0/24" -TimeoutSeconds 0.5 (para redes muito rápidas)
 
 param(
     [string]$PrinterIP = "",
@@ -10,7 +14,8 @@ param(
     [string]$OutputFile = "",
     [switch]$QuickScan = $false,
     [switch]$NetworkScan = $false,
-    [switch]$ScanAll = $false
+    [switch]$ScanAll = $false,
+    [int]$TimeoutSeconds = 1
 )
 
 # OIDs conhecidos para diferentes propriedades de impressoras
@@ -78,7 +83,7 @@ function Get-SNMPValue {
         
         # Verifica se o executável local existe
         if (Test-Path $snmpgetPath) {
-            $result = & $snmpgetPath -v2c -c $Community -t 3 -r 1 -On -Oe $IpAddress $OID 2>&1
+            $result = & $snmpgetPath -v2c -c $Community -t 2 -r 1 -On -Oe $IpAddress $OID 2>&1
         } else {
             Write-Warning "snmpget.exe não encontrado em: $snmpgetPath"
             return $null
@@ -144,7 +149,7 @@ function Get-SNMPWalk {
             return @()
         }
         
-        $result = & $snmpwalkPath -v2c -c $Community -t 3 -r 1 -On -Oe $IpAddress $OID 2>&1
+        $result = & $snmpwalkPath -v2c -c $Community -t 2 -r 1 -On -Oe $IpAddress $OID 2>&1
         
         if ($LASTEXITCODE -eq 0 -and $result) {
             $values = @()
@@ -513,7 +518,7 @@ function Test-SNMPDevice {
     param(
         [string]$IpAddress,
         [string]$Community = "public",
-        [int]$TimeoutSeconds = 2
+        [int]$TimeoutSeconds = 1
     )
     
     try {
@@ -621,7 +626,8 @@ function Start-NetworkPrinterScan {
     param(
         [string]$NetworkRange,
         [string]$Community = "public",
-        [switch]$ScanAll = $false
+        [switch]$ScanAll = $false,
+        [int]$TimeoutSeconds = 1
     )
     
     Write-Host "===============================================" -ForegroundColor Cyan
@@ -629,6 +635,7 @@ function Start-NetworkPrinterScan {
     Write-Host "===============================================" -ForegroundColor Cyan
     Write-Host "Rede: $NetworkRange" -ForegroundColor White
     Write-Host "Comunidade SNMP: $Community" -ForegroundColor White
+    Write-Host "Timeout por IP: $TimeoutSeconds segundo(s)" -ForegroundColor White
     
     if ($ScanAll) {
         Write-Host "Modo: Varrer TODAS as impressoras encontradas" -ForegroundColor Yellow
@@ -655,14 +662,14 @@ function Start-NetworkPrinterScan {
     foreach ($ip in $ips) {
         $currentIP++
         
-        # Mostra progresso a cada 10 IPs
-        if ($currentIP % 10 -eq 0 -or $currentIP -eq $totalIPs) {
+        # Mostra progresso a cada 5 IPs ou no último
+        if ($currentIP % 5 -eq 0 -or $currentIP -eq $totalIPs) {
             $percentage = [math]::Round(($currentIP / $totalIPs) * 100, 1)
             Write-Host "Progresso: $currentIP/$totalIPs ($percentage%) - Verificando $ip" -ForegroundColor Gray
         }
         
         # Testa SNMP no IP
-        $systemDescription = Test-SNMPDevice -IpAddress $ip -Community $Community -TimeoutSeconds 2
+        $systemDescription = Test-SNMPDevice -IpAddress $ip -Community $Community -TimeoutSeconds $TimeoutSeconds
         
         if ($systemDescription) {
             $foundDevices += @{
@@ -794,7 +801,7 @@ if ($NetworkScan -or $NetworkRange -or $ScanAll) {
         }
     }
       # Iniciar varredura de rede
-    $selectedPrinters = Start-NetworkPrinterScan -NetworkRange $NetworkRange -Community $Community -ScanAll:$ScanAll
+    $selectedPrinters = Start-NetworkPrinterScan -NetworkRange $NetworkRange -Community $Community -ScanAll:$ScanAll -TimeoutSeconds $TimeoutSeconds
     
     if (-not $selectedPrinters) {
         Write-Host "Nenhuma impressora selecionada para varredura de OIDs." -ForegroundColor Yellow
@@ -841,7 +848,6 @@ if ($NetworkScan -or $NetworkRange -or $ScanAll) {
     # Atualiza variável global para a função Start-PrinterOIDScan
     $global:PrinterIP = $PrinterIP
     Start-PrinterOIDScan
-}
 }
 
 Write-Host "`n===============================================" -ForegroundColor Green
