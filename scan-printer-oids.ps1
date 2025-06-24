@@ -441,104 +441,16 @@ function Start-PrinterOIDScan {
     }
 }
 
-# ===============================================
-# FLUXO PRINCIPAL DE EXECUÇÃO
-# ===============================================
-
-# Verifica se deve fazer varredura de rede ou IP direto
-if ($NetworkScan -or $NetworkRange -or $ScanAll) {
-    # Modo varredura de rede
-    Write-Host "===============================================" -ForegroundColor Cyan
-    Write-Host "MODO: VARREDURA DE REDE" -ForegroundColor Cyan
-    Write-Host "===============================================" -ForegroundColor Cyan
+# Função para converter CIDR em máscara de sub-rede
+function ConvertTo-SubnetMask {
+    param([int]$CIDR)
     
-    if (-not $NetworkRange) {
-        # Detectar rede local automaticamente
-        try {
-            $adapter = Get-NetAdapter | Where-Object { $_.Status -eq "Up" -and $_.InterfaceDescription -notlike "*Loopback*" -and $_.InterfaceDescription -notlike "*Virtual*" } | Select-Object -First 1
-            if ($adapter) {
-                $ipConfig = Get-NetIPAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 | Where-Object { $_.PrefixOrigin -eq "Dhcp" -or $_.PrefixOrigin -eq "Manual" } | Select-Object -First 1
-                if ($ipConfig) {
-                    $ip = $ipConfig.IPAddress
-                    $prefix = $ipConfig.PrefixLength
-                    $NetworkRange = "$ip/$prefix"
-                    Write-Host "Rede detectada automaticamente: $NetworkRange" -ForegroundColor Green
-                    
-                    if ($ScanAll) {
-                        # Se ScanAll foi especificado, converte para formato mais amplo
-                        $ipParts = $ip.Split('.')
-                        $NetworkRange = "$($ipParts[0]).$($ipParts[1]).$($ipParts[2]).*"
-                        Write-Host "Modo ScanAll ativado - Varrendo toda a subrede: $NetworkRange" -ForegroundColor Yellow
-                    }
-                }
-            }
-        } catch {
-            Write-Host "Erro ao detectar rede automaticamente: $($_.Exception.Message)" -ForegroundColor Red
-        }
-        
-        if (-not $NetworkRange) {
-            if ($ScanAll) {
-                Write-Host "Erro: Não foi possível detectar a rede local automaticamente." -ForegroundColor Red
-                Write-Host "Use: .\scan-printer-oids.ps1 -NetworkRange '192.168.1.*' -ScanAll" -ForegroundColor Yellow
-                exit 1
-            } else {
-                $NetworkRange = Read-Host "Digite o range de rede (ex: 192.168.1.0/24, 10.0.0.*, 172.16.1.1-172.16.1.50)"
-            }
-        }
-    }
-      # Iniciar varredura de rede
-    $selectedPrinters = Start-NetworkPrinterScan -NetworkRange $NetworkRange -Community $Community -ScanAll:$ScanAll
-    
-    if (-not $selectedPrinters) {
-        Write-Host "Nenhuma impressora selecionada para varredura de OIDs." -ForegroundColor Yellow
-        exit 0
-    }
-    
-    # Executar varredura de OIDs nas impressoras selecionadas
-    foreach ($printer in $selectedPrinters) {
-        Write-Host "`n===============================================" -ForegroundColor Magenta
-        Write-Host "INICIANDO VARREDURA DE OIDS" -ForegroundColor Magenta
-        Write-Host "Impressora: $($printer.IP) - $($printer.Model)" -ForegroundColor Magenta
-        Write-Host "===============================================" -ForegroundColor Magenta
-        
-        # Atualiza variável global para a função Start-PrinterOIDScan
-        $global:PrinterIP = $printer.IP
-        Start-PrinterOIDScan
-    }
-    
-} else {
-    # Modo varredura direta de IP
-    Write-Host "===============================================" -ForegroundColor Cyan
-    Write-Host "MODO: VARREDURA DIRETA DE IP" -ForegroundColor Cyan
-    Write-Host "===============================================" -ForegroundColor Cyan
-    
-    if (-not $PrinterIP) {
-        $PrinterIP = Read-Host "Digite o IP da impressora"
-    }
-    
-    Write-Host "IP da impressora: $PrinterIP" -ForegroundColor White
-    Write-Host "Comunidade SNMP: $Community" -ForegroundColor White
-    
-    if ($QuickScan) {
-        Write-Host "Modo Quick Scan: Apenas OIDs essenciais" -ForegroundColor Yellow
-        $global:KnownOIDs = @{
-            "Essenciais" = @{
-                "1.3.6.1.2.1.1.1.0" = "Descrição do Sistema"
-                "1.3.6.1.2.1.43.10.2.1.4.1.1" = "Contador de páginas"
-                "1.3.6.1.2.1.43.5.1.1.17.1" = "Número de série"
-                "1.3.6.1.2.1.1.5.0" = "Nome do Sistema"
-            }
-        }
-    }
-    
-    # Atualiza variável global para a função Start-PrinterOIDScan
-    $global:PrinterIP = $PrinterIP
-    Start-PrinterOIDScan
+    $mask = [Math]::Pow(2, 32) - [Math]::Pow(2, (32 - $CIDR))
+    $bytes = [System.BitConverter]::GetBytes([UInt32]$mask)
+    # Reverse the byte array to match network byte order for the IPAddress constructor.
+    [System.Array]::Reverse($bytes)
+    return [System.Net.IPAddress]::new($bytes).ToString()
 }
-
-Write-Host "`n===============================================" -ForegroundColor Green
-Write-Host "VARREDURA CONCLUÍDA COM SUCESSO" -ForegroundColor Green
-Write-Host "===============================================" -ForegroundColor Green
 
 # Função para gerar lista de IPs de uma rede
 function Get-NetworkIPs {
@@ -594,15 +506,6 @@ function Get-NetworkIPs {
     }
     
     return $ips
-}
-
-# Função para converter CIDR em máscara de sub-rede
-function ConvertTo-SubnetMask {
-    param([int]$CIDR)
-    
-    $mask = [Math]::Pow(2, 32) - [Math]::Pow(2, (32 - $CIDR))
-    $bytes = [System.BitConverter]::GetBytes([UInt32]$mask)
-    return [System.Net.IPAddress]::new($bytes[3], $bytes[2], $bytes[1], $bytes[0]).ToString()
 }
 
 # Função para testar se um IP tem SNMP habilitado
@@ -757,11 +660,188 @@ function Start-NetworkPrinterScan {
             $percentage = [math]::Round(($currentIP / $totalIPs) * 100, 1)
             Write-Host "Progresso: $currentIP/$totalIPs ($percentage%) - Verificando $ip" -ForegroundColor Gray
         }
-        
-        # Testa SNMP no IP
+          # Testa SNMP no IP
         $systemDescription = Test-SNMPDevice -IpAddress $ip -Community $Community -TimeoutSeconds 2
         
         if ($systemDescription) {
             $foundDevices += @{
+                IP = $ip
+                Description = $systemDescription
+            }
+            
+            # Verifica se é uma impressora
+            if (Test-IsPrinter -Description $systemDescription) {
+                $model = Get-PrinterModel -Description $systemDescription
+                $printers += @{
+                    IP = $ip
+                    Description = $systemDescription
+                    Model = $model
+                }
+                Write-Host "✓ Impressora encontrada: $ip - $model" -ForegroundColor Green
+            } else {
+                Write-Host "• Dispositivo SNMP: $ip - $($systemDescription.Substring(0, [Math]::Min(50, $systemDescription.Length)))..." -ForegroundColor Yellow
+            }
+        }
+    }
+    
+    Write-Host "`n===============================================" -ForegroundColor Cyan
+    Write-Host "RESULTADO DA VARREDURA" -ForegroundColor Cyan
+    Write-Host "===============================================" -ForegroundColor Cyan
+    Write-Host "Dispositivos SNMP encontrados: $($foundDevices.Count)" -ForegroundColor White
+    Write-Host "Impressoras encontradas: $($printers.Count)" -ForegroundColor Green
+    
+    if ($printers.Count -eq 0) {
+        Write-Host "`nNenhuma impressora encontrada na rede especificada." -ForegroundColor Red
+        Write-Host "Verifique se:" -ForegroundColor Yellow
+        Write-Host "- As impressoras estão ligadas e conectadas à rede" -ForegroundColor Yellow
+        Write-Host "- O SNMP está habilitado nas impressoras" -ForegroundColor Yellow
+        Write-Host "- A community string está correta (padrão: 'public')" -ForegroundColor Yellow
+        Write-Host "- O range de rede está correto" -ForegroundColor Yellow
+        return $null
+    }
+    
+    # Exibe lista de impressoras encontradas
+    Write-Host "`n===============================================" -ForegroundColor Green
+    Write-Host "IMPRESSORAS ENCONTRADAS" -ForegroundColor Green
+    Write-Host "===============================================" -ForegroundColor Green
+    
+    for ($i = 0; $i -lt $printers.Count; $i++) {
+        $printer = $printers[$i]
+        Write-Host "$($i + 1). $($printer.IP) - $($printer.Model)" -ForegroundColor White
+    }
+    
+    # Se ScanAll está ativo, retorna todas as impressoras automaticamente
+    if ($ScanAll) {
+        Write-Host "`n🔥 MODO SCAN ALL ATIVO - Varrendo todas as impressoras automaticamente!" -ForegroundColor Yellow
+        return $printers
+    }
+    
+    # Permite seleção de impressora ou todas
+    Write-Host "`n===============================================" -ForegroundColor Cyan
+    Write-Host "SELEÇÃO DE IMPRESSORA" -ForegroundColor Cyan
+    Write-Host "===============================================" -ForegroundColor Cyan
+    Write-Host "Digite o número da impressora para varredura de OIDs" -ForegroundColor White
+    Write-Host "Digite 'A' para varrer todas as impressoras" -ForegroundColor White
+    Write-Host "Digite 'S' para sair sem varredura" -ForegroundColor White
+    
+    do {
+        $selection = Read-Host "`nSua escolha"
+        
+        if ($selection -eq 'S' -or $selection -eq 's') {
+            Write-Host "Saindo..." -ForegroundColor Yellow
+            return $null
+        }
+        
+        if ($selection -eq 'A' -or $selection -eq 'a') {
+            return $printers
+        }
+        
+        if ($selection -match '^\d+$') {
+            $index = [int]$selection - 1
+            if ($index -ge 0 -and $index -lt $printers.Count) {
+                return @($printers[$index])
+            }
+        }
+        
+        Write-Host "Seleção inválida. Digite um número válido, 'A' para todas ou 'S' para sair." -ForegroundColor Red
+    } while ($true)
+}
 
+# ===============================================
+# FLUXO PRINCIPAL DE EXECUÇÃO
+# ===============================================
 
+# Verifica se deve fazer varredura de rede ou IP direto
+if ($NetworkScan -or $NetworkRange -or $ScanAll) {
+    # Modo varredura de rede
+    Write-Host "===============================================" -ForegroundColor Cyan
+    Write-Host "MODO: VARREDURA DE REDE" -ForegroundColor Cyan
+    Write-Host "===============================================" -ForegroundColor Cyan
+    
+    if (-not $NetworkRange) {
+        # Detectar rede local automaticamente
+        try {
+            $adapter = Get-NetAdapter | Where-Object { $_.Status -eq "Up" -and $_.InterfaceDescription -notlike "*Loopback*" -and $_.InterfaceDescription -notlike "*Virtual*" } | Select-Object -First 1
+            if ($adapter) {
+                $ipConfig = Get-NetIPAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 | Where-Object { $_.PrefixOrigin -eq "Dhcp" -or $_.PrefixOrigin -eq "Manual" } | Select-Object -First 1
+                if ($ipConfig) {
+                    $ip = $ipConfig.IPAddress
+                    $prefix = $ipConfig.PrefixLength
+                    $NetworkRange = "$ip/$prefix"
+                    Write-Host "Rede detectada automaticamente: $NetworkRange" -ForegroundColor Green
+                    
+                    if ($ScanAll) {
+                        # Se ScanAll foi especificado, converte para formato mais amplo
+                        $ipParts = $ip.Split('.')
+                        $NetworkRange = "$($ipParts[0]).$($ipParts[1]).$($ipParts[2]).*"
+                        Write-Host "Modo ScanAll ativado - Varrendo toda a subrede: $NetworkRange" -ForegroundColor Yellow
+                    }
+                }
+            }
+        } catch {
+            Write-Host "Erro ao detectar rede automaticamente: $($_.Exception.Message)" -ForegroundColor Red
+        }
+        
+        if (-not $NetworkRange) {
+            if ($ScanAll) {
+                Write-Host "Erro: Não foi possível detectar a rede local automaticamente." -ForegroundColor Red
+                Write-Host "Use: .\scan-printer-oids.ps1 -NetworkRange '192.168.1.*' -ScanAll" -ForegroundColor Yellow
+                exit 1
+            } else {
+                $NetworkRange = Read-Host "Digite o range de rede (ex: 192.168.1.0/24, 10.0.0.*, 172.16.1.1-172.16.1.50)"
+            }
+        }
+    }
+      # Iniciar varredura de rede
+    $selectedPrinters = Start-NetworkPrinterScan -NetworkRange $NetworkRange -Community $Community -ScanAll:$ScanAll
+    
+    if (-not $selectedPrinters) {
+        Write-Host "Nenhuma impressora selecionada para varredura de OIDs." -ForegroundColor Yellow
+        exit 0
+    }
+    
+    # Executar varredura de OIDs nas impressoras selecionadas
+    foreach ($printer in $selectedPrinters) {
+        Write-Host "`n===============================================" -ForegroundColor Magenta
+        Write-Host "INICIANDO VARREDURA DE OIDS" -ForegroundColor Magenta
+        Write-Host "Impressora: $($printer.IP) - $($printer.Model)" -ForegroundColor Magenta
+        Write-Host "===============================================" -ForegroundColor Magenta
+        
+        # Atualiza variável global para a função Start-PrinterOIDScan
+        $global:PrinterIP = $printer.IP
+        Start-PrinterOIDScan
+    }
+    
+} else {
+    # Modo varredura direta de IP
+    Write-Host "===============================================" -ForegroundColor Cyan
+    Write-Host "MODO: VARREDURA DIRETA DE IP" -ForegroundColor Cyan
+    Write-Host "===============================================" -ForegroundColor Cyan
+    
+    if (-not $PrinterIP) {
+        $PrinterIP = Read-Host "Digite o IP da impressora"
+    }
+    
+    Write-Host "IP da impressora: $PrinterIP" -ForegroundColor White
+    Write-Host "Comunidade SNMP: $Community" -ForegroundColor White
+    
+    if ($QuickScan) {
+        Write-Host "Modo Quick Scan: Apenas OIDs essenciais" -ForegroundColor Yellow
+        $global:KnownOIDs = @{
+            "Essenciais" = @{
+                "1.3.6.1.2.1.1.1.0" = "Descrição do Sistema"
+                "1.3.6.1.2.1.43.10.2.1.4.1.1" = "Contador de páginas"
+                "1.3.6.1.2.1.43.5.1.1.17.1" = "Número de série"
+                "1.3.6.1.2.1.1.5.0" = "Nome do Sistema"
+            }
+        }
+    }
+    
+    # Atualiza variável global para a função Start-PrinterOIDScan
+    $global:PrinterIP = $PrinterIP
+    Start-PrinterOIDScan
+}
+
+Write-Host "`n===============================================" -ForegroundColor Green
+Write-Host "VARREDURA CONCLUÍDA COM SUCESSO" -ForegroundColor Green
+Write-Host "===============================================" -ForegroundColor Green
